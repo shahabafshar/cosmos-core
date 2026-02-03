@@ -405,10 +405,18 @@ show_menu() {
     echo -e "$COSMOS_BANNER"
     echo -e "     ${YELLOW}╔══════════════════════════════════════════════════════════╗${NC}"
     echo -e "     ${YELLOW}║${NC}  ${CYAN}1.${NC} Select nodes (choose which nodes to work with)       ${YELLOW}║${NC}"
-    echo -e "     ${YELLOW}║${NC}  ${CYAN}2.${NC} Initialize selected nodes (load image, power on)     ${YELLOW}║${NC}"
-    echo -e "     ${YELLOW}║${NC}  ${CYAN}3.${NC} Setup selected nodes (cleanup + install packages)    ${YELLOW}║${NC}"
-    echo -e "     ${YELLOW}║${NC}  ${CYAN}4.${NC} Check selected nodes (ping reachability)             ${YELLOW}║${NC}"
-    echo -e "     ${YELLOW}║${NC}  ${CYAN}5.${NC} Power off selected nodes                             ${YELLOW}║${NC}"
+    # Check if plan file exists and has content
+    if [ -f "$PLAN_FILE" ] && [ -s "$PLAN_FILE" ]; then
+        echo -e "     ${YELLOW}║${NC}  ${CYAN}2.${NC} Initialize selected nodes (load image, power on)     ${YELLOW}║${NC}"
+        echo -e "     ${YELLOW}║${NC}  ${CYAN}3.${NC} Setup selected nodes (cleanup + install packages)    ${YELLOW}║${NC}"
+        echo -e "     ${YELLOW}║${NC}  ${CYAN}4.${NC} Check selected nodes (ping reachability)             ${YELLOW}║${NC}"
+        echo -e "     ${YELLOW}║${NC}  ${CYAN}5.${NC} Power off selected nodes                             ${YELLOW}║${NC}"
+    else
+        echo -e "     ${YELLOW}║${NC}  ${RED}2.${NC} Initialize selected nodes (select nodes first)       ${YELLOW}║${NC}"
+        echo -e "     ${YELLOW}║${NC}  ${RED}3.${NC} Setup selected nodes (select nodes first)            ${YELLOW}║${NC}"
+        echo -e "     ${YELLOW}║${NC}  ${RED}4.${NC} Check selected nodes (select nodes first)            ${YELLOW}║${NC}"
+        echo -e "     ${YELLOW}║${NC}  ${RED}5.${NC} Power off selected nodes (select nodes first)        ${YELLOW}║${NC}"
+    fi
     echo -e "     ${YELLOW}║${NC}  ${CYAN}6.${NC} About Cosmos Core                                    ${YELLOW}║${NC}"
     echo -e "     ${YELLOW}║${NC}  ${CYAN}7.${NC} Exit                                                 ${YELLOW}║${NC}"
     echo -e "     ${YELLOW}╚══════════════════════════════════════════════════════════╝${NC}"
@@ -420,10 +428,18 @@ while true; do
     read -r choice
     case $choice in
         1) check_requirements && configure_node_plan ;;
-        2) check_requirements && initialize_environment ;;
-        3) check_requirements && setup_nodes ;;
-        4) check_requirements && check_nodes ;;
-        5) check_requirements && power_off_all_nodes ;;
+        2|3|4|5)
+            if [ ! -f "$PLAN_FILE" ] || [ ! -s "$PLAN_FILE" ]; then
+                echo -e "${RED}Please select nodes first (option 1).${NC}"
+            else
+                case $choice in
+                    2) check_requirements && initialize_environment ;;
+                    3) check_requirements && setup_nodes ;;
+                    4) check_requirements && check_nodes ;;
+                    5) check_requirements && power_off_all_nodes ;;
+                esac
+            fi
+            ;;
         6) show_about ; continue ;;
         7) echo -e "\n${GREEN}Bye.${NC}"; exit 0 ;;
         *) echo -e "${RED}Invalid option.${NC}" ;;
