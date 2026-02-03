@@ -55,88 +55,9 @@ done
 # Record start time
 init_start_time=$(date +%s)
 
-# --- Pre-check: parallel ping to catch obviously dead nodes ---
-echo -e "\n${CYAN}Pre-check: testing node reachability...${NC}"
+# Create temp directory for output files
 tmpdir=$(mktemp -d)
 trap "rm -rf '$tmpdir'" EXIT
-
-declare -A precheck_status
-pids=()
-for i in "${!required_nodes[@]}"; do
-    hostname="${required_nodes[i]}"
-    (
-        # Try ping first (fast), then SSH check
-        if ping -c 1 -W 2 "$hostname" >/dev/null 2>&1; then
-            echo "ok" > "$tmpdir/$i"
-        else
-            echo "fail" > "$tmpdir/$i"
-        fi
-    ) &
-    pids+=($!)
-done
-wait "${pids[@]}" 2>/dev/null || true
-
-# Collect pre-check results
-precheck_ok=()
-precheck_ok_keys=()
-precheck_fail=()
-precheck_fail_keys=()
-for i in "${!required_nodes[@]}"; do
-    hostname="${required_nodes[i]}"
-    key="${node_keys[i]}"
-    status=$(cat "$tmpdir/$i" 2>/dev/null || echo "fail")
-    if [ "$status" = "ok" ]; then
-        echo -e "  ${GREEN}✓${NC} $hostname"
-        precheck_ok+=("$hostname")
-        precheck_ok_keys+=("$key")
-    else
-        echo -e "  ${RED}✗${NC} $hostname ${YELLOW}(unreachable)${NC}"
-        precheck_fail+=("$hostname")
-        precheck_fail_keys+=("$key")
-    fi
-done
-
-# Handle pre-check failures
-if [ ${#precheck_fail[@]} -gt 0 ]; then
-    echo -e "\n${YELLOW}Warning:${NC} ${#precheck_fail[@]} node(s) unreachable in pre-check."
-    
-    if [ ${#precheck_ok[@]} -eq 0 ]; then
-        echo -e "${RED}No reachable nodes. Aborting.${NC}"
-        # Mark all as failed
-        for key in "${precheck_fail_keys[@]}"; do
-            mark_node_failed "$key"
-        done
-        exit 1
-    fi
-    
-    echo -e "Continue with ${#precheck_ok[@]} reachable node(s)? [Y/n/a]"
-    echo -e "  ${CYAN}Y${NC} = yes, skip unreachable    ${CYAN}n${NC} = abort    ${CYAN}a${NC} = try all anyway"
-    read -r choice
-    case "$choice" in
-        n|N)
-            echo "Aborted."
-            exit 1
-            ;;
-        a|A)
-            echo "Proceeding with all nodes (including unreachable)..."
-            # Don't mark as failed yet, let OMF try
-            ;;
-        *)
-            echo "Proceeding with reachable nodes only..."
-            # Mark unreachable as failed
-            for key in "${precheck_fail_keys[@]}"; do
-                mark_node_failed "$key"
-            done
-            required_nodes=("${precheck_ok[@]}")
-            node_keys=("${precheck_ok_keys[@]}")
-            ;;
-    esac
-fi
-
-if [ ${#required_nodes[@]} -eq 0 ]; then
-    echo -e "${RED}No nodes remaining to initialize.${NC}"
-    exit 1
-fi
 
 # --- Main initialization ---
 echo -e "\n${CYAN}Turning off all nodes...${NC}"
@@ -170,11 +91,19 @@ timer_pid=""
         mins=$((elapsed / 60))
         secs=$((elapsed % 60))
         # Move cursor to beginning of line, print timer, clear rest of line
-        printf "\r  ${YELLOW}[Elapsed: %d:%02d]${NC} (~10 min total)   \033[K" "$mins" "$secs"
+        printf "\r  ${YELLOW}[Elapsed: %d:%02d]${NC} - approx 10 min total   \033[K" "$mins" "$secs"
         sleep 1
     done
 ) &
 timer_pid=$!
+
+# Ensure timer is killed on script exit (success or failure)
+cleanup_timer() {
+    [ -n "$timer_pid" ] && kill $timer_pid 2>/dev/null || true
+    wait $timer_pid 2>/dev/null || true
+    printf "\r\033[K"
+}
+trap cleanup_timer EXIT
 
 # Run omf-5.4 load and capture output
 omf_output_file="$tmpdir/omf_output.txt"
@@ -201,17 +130,144 @@ done
 omf_exit=$?
 set -e
 
-# Stop the timer
-[ -n "$timer_pid" ] && kill $timer_pid 2>/dev/null || true
-wait $timer_pid 2>/dev/null || true
-printf "\r\033[K"  # Clear timer line
+# Stop the timer (also handled by trap, but do it here explicitly)
+cleanup_timer
+timer_pid=""  # Prevent double-kill in trap
 
 # Show imaging duration
 imaging_end=$(date +%s)
 imaging_elapsed=$((imaging_end - imaging_start))
 imaging_mins=$((imaging_elapsed / 60))
 imaging_secs=$((imaging_elapsed % 60))
-echo -e "  ${GREEN}Imaging completed in ${imaging_mins}m ${imaging_secs}s${NC}"
+echo -e "  ${GREEN}Imaging phase completed in ${imaging_mins}m ${imaging_secs}s${NC}"
+
+# Check for mixed disk error and handle it
+if grep -q "mixed disk names were found" "$omf_output_file" 2>/dev/null; then
+    echo -e "\n${YELLOW}Mixed disk types detected!${NC}"
+    echo -e "  ORBIT cannot image nodes with different disk types in one batch."
+    echo -e "  Attempting to detect disk types and retry in groups...\n"
+    
+    # Power on nodes temporarily to check disk types
+    echo -e "${CYAN}Powering on nodes to detect disk types...${NC}"
+    omf tell -a on -t "$node_list" 2>&1 | grep -v "^/.*warning:" || true
+    sleep 30  # Wait for nodes to boot
+    
+    # Detect disk type for each node via SSH - dynamic grouping
+    declare -A node_disk_type      # node_disk_type[hostname]="/dev/sda"
+    declare -A node_key_map        # node_key_map[hostname]="node1-4"
+    declare -a all_disk_types=()   # unique list of disk types found
+    declare -A disk_type_nodes     # disk_type_nodes["/dev/sda"]="host1,host2"
+    declare -A disk_type_keys      # disk_type_keys["/dev/sda"]="key1,key2"
+    unknown_nodes=()
+    unknown_keys=()
+    
+    for i in "${!required_nodes[@]}"; do
+        hostname="${required_nodes[i]}"
+        key="${node_keys[i]}"
+        node_key_map["$hostname"]="$key"
+        printf "  Checking %s... " "$hostname"
+        
+        # Try to detect primary disk device via SSH
+        # Check common disk devices in order of preference
+        disk_dev=$(ssh $SSH_OPTS root@"$hostname" '
+            for dev in /dev/sda /dev/nvme0n1 /dev/vda /dev/hda /dev/xvda /dev/sdb /dev/nvme1n1; do
+                if [ -b "$dev" ]; then
+                    echo "$dev"
+                    exit 0
+                fi
+            done
+            echo "unknown"
+        ' 2>/dev/null || echo "unreachable")
+        
+        if [ "$disk_dev" = "unknown" ] || [ "$disk_dev" = "unreachable" ]; then
+            echo -e "${RED}$disk_dev${NC}"
+            unknown_nodes+=("$hostname")
+            unknown_keys+=("$key")
+            mark_node_failed "$key"
+        else
+            echo -e "${GREEN}$disk_dev${NC}"
+            node_disk_type["$hostname"]="$disk_dev"
+            
+            # Add to disk type group
+            if [ -z "${disk_type_nodes[$disk_dev]:-}" ]; then
+                all_disk_types+=("$disk_dev")
+                disk_type_nodes["$disk_dev"]="$hostname"
+                disk_type_keys["$disk_dev"]="$key"
+            else
+                disk_type_nodes["$disk_dev"]="${disk_type_nodes[$disk_dev]},$hostname"
+                disk_type_keys["$disk_dev"]="${disk_type_keys[$disk_dev]},$key"
+            fi
+        fi
+    done
+    
+    # Summary
+    echo ""
+    echo -e "  ${CYAN}Disk types found:${NC}"
+    for dtype in "${all_disk_types[@]}"; do
+        # Count nodes in this group
+        IFS=',' read -ra nodes_arr <<< "${disk_type_nodes[$dtype]}"
+        echo -e "    $dtype: ${#nodes_arr[@]} node(s)"
+    done
+    if [ ${#unknown_nodes[@]} -gt 0 ]; then
+        echo -e "    ${RED}unknown/unreachable: ${#unknown_nodes[@]} node(s)${NC}"
+    fi
+    
+    # Now image each disk type group separately
+    imaging_successful=()
+    imaging_successful_keys=()
+    
+    for dtype in "${all_disk_types[@]}"; do
+        IFS=',' read -ra group_nodes <<< "${disk_type_nodes[$dtype]}"
+        IFS=',' read -ra group_keys <<< "${disk_type_keys[$dtype]}"
+        
+        echo -e "\n${CYAN}Imaging ${#group_nodes[@]} node(s) with $dtype...${NC}"
+        group_list=$(IFS=,; echo "${group_nodes[*]}")
+        
+        # Power off and image this group
+        omf tell -a offh -t "$group_list" 2>&1 | grep -v "^/.*warning:" || true
+        sleep 5
+        
+        group_omf_output="$tmpdir/omf_group_${dtype//\//_}.txt"
+        if omf-5.4 load -i wifi-experiment.ndz -t "$group_list" 2>&1 | grep -v "^/.*warning:" | tee "$group_omf_output"; then
+            # Check for failures in this group
+            for j in "${!group_nodes[@]}"; do
+                gh="${group_nodes[j]}"
+                gk="${group_keys[j]}"
+                if grep -q "Giving up on node.*$gh" "$group_omf_output" 2>/dev/null; then
+                    echo -e "  ${RED}✗${NC} $gh failed during imaging"
+                    mark_node_failed "$gk"
+                else
+                    imaging_successful+=("$gh")
+                    imaging_successful_keys+=("$gk")
+                fi
+            done
+        else
+            echo -e "  ${YELLOW}Imaging command returned error for $dtype group${NC}"
+            # Try to salvage any that might have worked
+            for j in "${!group_nodes[@]}"; do
+                gh="${group_nodes[j]}"
+                gk="${group_keys[j]}"
+                if ! grep -q "Giving up on node.*$gh\|failed.*$gh" "$group_omf_output" 2>/dev/null; then
+                    imaging_successful+=("$gh")
+                    imaging_successful_keys+=("$gk")
+                else
+                    mark_node_failed "$gk"
+                fi
+            done
+        fi
+    done
+    
+    # Update required_nodes to only successfully imaged ones
+    required_nodes=("${imaging_successful[@]}")
+    node_keys=("${imaging_successful_keys[@]}")
+    
+    if [ ${#required_nodes[@]} -eq 0 ]; then
+        echo -e "\n${RED}No nodes successfully imaged after disk type grouping.${NC}"
+        exit 1
+    fi
+    
+    echo -e "\n${GREEN}Successfully imaged ${#required_nodes[@]} node(s) across disk type groups${NC}"
+fi
 
 # Parse OMF output for failures
 echo -e "\n${CYAN}Analyzing imaging results...${NC}"
@@ -265,8 +321,8 @@ echo -e "\n${CYAN}Turning on ${#successful_nodes[@]} successfully imaged nodes..
 omf tell -a on -t "$node_list" 2>&1 | grep -v "^/.*warning:" || true
 sleep 10
 
-# --- Final reachability check (parallel) ---
-echo -e "\n${CYAN}Verifying nodes are up (timeout: 5 min)...${NC}"
+# --- Final reachability check - parallel ---
+echo -e "\n${CYAN}Verifying nodes are up [timeout: 5 min]...${NC}"
 timeout=300  # 5 minutes
 start_time=$(date +%s)
 final_ok=()
@@ -356,12 +412,9 @@ if [ ${#final_ok[@]} -gt 0 ]; then
     done
 fi
 
-total_failed=$((${#precheck_fail[@]} + ${#imaging_failed[@]} + ${#final_fail[@]}))
+total_failed=$((${#imaging_failed[@]} + ${#final_fail[@]}))
 if [ $total_failed -gt 0 ]; then
     echo -e "\n  ${RED}✗ Failed ($total_failed):${NC}"
-    for h in "${precheck_fail[@]}"; do
-        echo -e "    • $h ${YELLOW}(pre-check)${NC}"
-    done
     for h in "${imaging_failed[@]}"; do
         echo -e "    • $h ${YELLOW}(imaging)${NC}"
     done
