@@ -53,3 +53,22 @@ stop_background_process() {
     local pid=$2
     run_ssh_command "$hostname" "kill $pid 2>/dev/null || true"
 }
+
+# Output enabled node keys (one per line). Requires NODES and optionally PLAN_FILE from config.
+# If PLAN_FILE exists and is non-empty, only those keys are output; else all keys, sorted.
+get_enabled_node_keys() {
+    local k
+    local all_keys
+    all_keys=$(printf '%s\n' "${!NODES[@]}" | sort -V)
+    if [ -n "${PLAN_FILE:-}" ] && [ -f "$PLAN_FILE" ]; then
+        if [ -s "$PLAN_FILE" ]; then
+            while IFS= read -r k; do
+                k="${k%%[[:space:]]*}"
+                [ -z "$k" ] && continue
+                [ -n "${NODES[$k]+x}" ] && echo "$k"
+            done < "$PLAN_FILE"
+        fi
+    else
+        echo "$all_keys"
+    fi
+}

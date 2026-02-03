@@ -47,15 +47,24 @@ run_extra_commands() {
     fi
 }
 
-# Main setup: cleanup, install packages, optional extra commands on every node
+# Ensure every enabled node has a clean state and basic packages.
+enabled_count=0
 main() {
-    for node_name in "${!NODES[@]}"; do
-        IFS='|' read -r hostname ip role interface network <<< "${NODES[$node_name]}"
+    local keys
+    keys=($(get_enabled_node_keys))
+    if [ ${#keys[@]} -eq 0 ]; then
+        echo "No nodes enabled in the plan. Use 'Configure node plan' in the menu to enable nodes."
+        exit 1
+    fi
+    while IFS= read -r node_name; do
+        [ -z "$node_name" ] && continue
+        IFS='|' read -r hostname interface <<< "${NODES[$node_name]}"
         echo "Processing node: $node_name ($hostname)"
         cleanup_node "$hostname" "$interface"
         install_packages "$hostname" || { echo "Error: Package installation failed on $hostname"; exit 1; }
         run_extra_commands "$hostname"
-    done
+        ((enabled_count++)) || true
+    done < <(get_enabled_node_keys)
     echo "Setup completed successfully!"
 }
 
@@ -69,5 +78,5 @@ seconds=$((total_elapsed % 60))
 echo "====================setup======================="
 echo "Setup completed successfully"
 echo "Total setup time: ${minutes}m ${seconds}s"
-echo "Nodes configured: ${#NODES[@]}"
+echo "Nodes configured: $enabled_count"
 echo "================================================"

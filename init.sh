@@ -7,12 +7,17 @@ set -e
 source config.sh
 source lib.sh
 
-# Get list of required nodes
+# Get list of required nodes (only those enabled in the plan)
 required_nodes=()
-for node_name in "${!NODES[@]}"; do
-    IFS='|' read -r hostname _ _ _ _ <<< "${NODES[$node_name]}"
+while IFS= read -r node_name; do
+    [ -z "$node_name" ] && continue
+    IFS='|' read -r hostname _ <<< "${NODES[$node_name]}"
     required_nodes+=("$hostname")
-done
+done < <(get_enabled_node_keys)
+if [ ${#required_nodes[@]} -eq 0 ]; then
+    echo "No nodes enabled in the plan. Use 'Configure node plan' in the menu to enable nodes."
+    exit 1
+fi
 
 # Record start time
 init_start_time=$(date +%s)
