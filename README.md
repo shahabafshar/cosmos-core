@@ -47,6 +47,8 @@ All scripts except the entry point live in `scripts/`. The menu offers:
 6. **About** — Credits and short description.
 7. **Exit**
 
+> **Note:** Options 2-5 are disabled until you select nodes first (option 1). Your node selection is saved to `.cosmos_plan` (gitignored).
+
 Manual usage (from repo root):
 
 ```bash
@@ -105,7 +107,7 @@ Edit `scripts/config.sh`:
 - **NODE_DOMAIN** — Auto-detected or set manually (e.g. `outdoor.orbit-lab.org`).
 - **NODE_NAMES** — Auto-discovered or hardcoded fallback list of short node names.
 - **DEFAULT_INTERFACE** — Interface to reset during Setup (e.g. `wlan0`).
-- **PLAN_FILE** — File that stores which nodes are on (default: `.cosmos_plan` at repo root). Edit via the menu.
+- **PLAN_FILE** — File that stores your node selection (default: `.cosmos_plan` at repo root, gitignored). Created via menu option 1.
 - **PACKAGES** — Space-separated list of packages to install on each node (default: `iperf3 tmux`).
 - **SETUP_EXTRA_COMMANDS** — Optional array of commands to run on each node after package install.
 
