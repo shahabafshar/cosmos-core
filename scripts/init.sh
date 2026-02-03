@@ -77,21 +77,45 @@ sleep 3
 node_list=$(IFS=,; echo "${required_nodes[*]}")
 
 # --- Load image (capture output to parse for failures) ---
+# Timeout for imaging process (seconds) - default 12 minutes
+IMAGING_TIMEOUT=${IMAGING_TIMEOUT:-720}
+
 echo -e "\n${CYAN}Loading image on ${#required_nodes[@]} nodes...${NC}"
-echo -e "  This typically takes 8-12 minutes. Watching for failures..."
+timeout_mins=$((IMAGING_TIMEOUT / 60))
+echo -e "  Timeout: ${timeout_mins} min (working nodes usually finish in ~2 min)"
 echo ""
 
-# Start elapsed timer in background
+# Progress tracking
+total_nodes=${#required_nodes[@]}
+echo "0" > "$tmpdir/nodes_up"
+
+# Start elapsed timer with progress bar in background
 imaging_start=$(date +%s)
 timer_pid=""
 (
+    t_mins=$((IMAGING_TIMEOUT / 60))
     while true; do
         now=$(date +%s)
         elapsed=$((now - imaging_start))
         mins=$((elapsed / 60))
         secs=$((elapsed % 60))
-        # Move cursor to beginning of line, print timer, clear rest of line
-        printf "\r  ${YELLOW}[Elapsed: %d:%02d]${NC} - approx 10 min total   \033[K" "$mins" "$secs"
+        
+        # Read current progress
+        nodes_up=$(cat "$tmpdir/nodes_up" 2>/dev/null || echo "0")
+        
+        # Build progress bar: [####.........] format
+        bar=""
+        for ((i=0; i<total_nodes; i++)); do
+            if [ $i -lt $nodes_up ]; then
+                bar="${bar}#"
+            else
+                bar="${bar}."
+            fi
+        done
+        
+        # Format: [1:30 / 4:00] [####.........] 4/13
+        printf "\r  ${YELLOW}[%d:%02d / %d:00]${NC} ${GREEN}[%s]${NC} %d/%d   \033[K" \
+            "$mins" "$secs" "$t_mins" "$bar" "$nodes_up" "$total_nodes"
         sleep 1
     done
 ) &
@@ -105,32 +129,37 @@ cleanup_timer() {
 }
 trap cleanup_timer EXIT
 
-# Run omf-5.4 load and capture output
+# Run omf-5.4 load with timeout - show output live AND save to file
 omf_output_file="$tmpdir/omf_output.txt"
 set +e  # Don't exit on error here
-omf-5.4 load -i wifi-experiment.ndz -t "$node_list" 2>&1 | tee "$omf_output_file" | while IFS= read -r line; do
-    # Filter out Ruby warnings
-    echo "$line" | grep -q "^/.*warning:" && continue
-    # Clear timer line before printing output
+
+# Use timeout to hard-kill OMF if it exceeds our limit
+# Use stdbuf/grep --line-buffered to prevent output buffering
+timeout --signal=TERM --kill-after=10 $IMAGING_TIMEOUT \
+    stdbuf -oL omf-5.4 load -i wifi-experiment.ndz -t "$node_list" -o "$IMAGING_TIMEOUT" 2>&1 | \
+    grep --line-buffered -v "^/.*warning:" | \
+    stdbuf -oL tee "$omf_output_file" | \
+    while IFS= read -r line; do
+        # Update progress from "Waiting for nodes" lines
+        if echo "$line" | grep -q "Waiting for nodes"; then
+            up_count=$(echo "$line" | grep -oP '\): \K[0-9]+' || echo "0")
+            [ -n "$up_count" ] && echo "$up_count" > "$tmpdir/nodes_up"
+        fi
+        # Print the line (clearing progress bar first, it will redraw)
+        printf "\r\033[K"
+        echo "$line"
+    done
+omf_exit=${PIPESTATUS[0]}
+
+# Check if we timed out
+if [ $omf_exit -eq 124 ] || [ $omf_exit -eq 137 ]; then
     printf "\r\033[K"
-    # Highlight important messages
-    if echo "$line" | grep -q "Giving up on node"; then
-        failed_host=$(echo "$line" | grep -oP "node[0-9]+-[0-9]+\.[a-z0-9.-]+")
-        echo -e "  ${RED}✗${NC} $line"
-    elif echo "$line" | grep -q "successfully imaged"; then
-        echo -e "  ${GREEN}✓${NC} $line"
-    elif echo "$line" | grep -q "failed to check in"; then
-        echo -e "  ${RED}✗${NC} $line"
-    elif echo "$line" | grep -qi "error\|fail"; then
-        echo -e "  ${YELLOW}⚠${NC} $line"
-    else
-        echo "  $line"
-    fi
-done
-omf_exit=$?
+    echo -e "  ${YELLOW}⚠ Timeout reached - stopping imaging${NC}"
+fi
+omf_exit=${PIPESTATUS[0]}
 set -e
 
-# Stop the timer (also handled by trap, but do it here explicitly)
+# Stop the timer
 cleanup_timer
 timer_pid=""  # Prevent double-kill in trap
 
@@ -139,7 +168,7 @@ imaging_end=$(date +%s)
 imaging_elapsed=$((imaging_end - imaging_start))
 imaging_mins=$((imaging_elapsed / 60))
 imaging_secs=$((imaging_elapsed % 60))
-echo -e "  ${GREEN}Imaging phase completed in ${imaging_mins}m ${imaging_secs}s${NC}"
+echo -e "  ${GREEN}Imaging completed in ${imaging_mins}m ${imaging_secs}s${NC}"
 
 # Check for mixed disk error and handle it
 if grep -q "mixed disk names were found" "$omf_output_file" 2>/dev/null; then
@@ -228,7 +257,7 @@ if grep -q "mixed disk names were found" "$omf_output_file" 2>/dev/null; then
         sleep 5
         
         group_omf_output="$tmpdir/omf_group_${dtype//\//_}.txt"
-        if omf-5.4 load -i wifi-experiment.ndz -t "$group_list" 2>&1 | grep -v "^/.*warning:" | tee "$group_omf_output"; then
+        if omf-5.4 load -i wifi-experiment.ndz -t "$group_list" -o "$IMAGING_TIMEOUT" 2>&1 | grep -v "^/.*warning:" | tee "$group_omf_output"; then
             # Check for failures in this group
             for j in "${!group_nodes[@]}"; do
                 gh="${group_nodes[j]}"

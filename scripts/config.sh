@@ -17,6 +17,9 @@
 #
 # LOG_DIR         — Directory for logs.
 #
+# IMAGING_TIMEOUT — Timeout for omf-5.4 load (imaging). Default 720s (12 min).
+# SETUP_TIMEOUT   — Timeout for setup operations. Default 300s (5 min).
+#
 # ======================================
 
 # Repo root (so paths work from scripts/ or root)
@@ -25,6 +28,10 @@ PLAN_FILE="$COSMOS_ROOT/.cosmos_plan"
 NODES_CACHE="$COSMOS_ROOT/.cosmos_nodes"
 FAILED_NODES_FILE="$COSMOS_ROOT/.cosmos_failed"
 LOG_DIR="$COSMOS_ROOT/logs"
+
+# Timeouts (seconds)
+IMAGING_TIMEOUT=240      # 4 minutes for omf-5.4 load (working nodes finish in ~2 min)
+SETUP_TIMEOUT=300        # 5 minutes for setup per-node operations
 
 # Source lib.sh for discovery functions (if not already sourced)
 if ! declare -f discover_nodes &>/dev/null; then
