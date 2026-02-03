@@ -18,7 +18,10 @@
 #
 # ======================================
 
-PLAN_FILE=".cosmos_plan"
+# Repo root (so paths work from scripts/ or root)
+COSMOS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PLAN_FILE="$COSMOS_ROOT/.cosmos_plan"
+LOG_DIR="$COSMOS_ROOT/logs"
 
 # All nodes (hostnames). Which ones are used is chosen in the menu: Configure node plan.
 # ORBIT outdoor fixed nodes (12): https://www.orbit-lab.org/wiki/Hardware/bDomains/bOutdoor
@@ -42,5 +45,3 @@ PACKAGES="iperf3 tmux"
 
 # Optional: extra commands per node after package install (uncomment to use)
 # SETUP_EXTRA_COMMANDS=("timedatectl set-ntp true")
-
-LOG_DIR="logs"

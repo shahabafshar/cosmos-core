@@ -4,11 +4,12 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'
 
-if [ ! -f "cosmos.sh" ]; then
-    echo -e "${RED}cosmos.sh not found${NC}"
+COSMOS_ROOT="$(cd "$(dirname "$0")" && pwd)"
+if [ ! -f "$COSMOS_ROOT/scripts/cosmos.sh" ]; then
+    echo -e "${RED}scripts/cosmos.sh not found${NC}"
     exit 1
 fi
 
-[ -x "cosmos.sh" ] || chmod +x cosmos.sh
+[ -x "$COSMOS_ROOT/scripts/cosmos.sh" ] || chmod +x "$COSMOS_ROOT/scripts/cosmos.sh"
 echo -e "${GREEN}Starting Cosmos Core...${NC}"
-./cosmos.sh
+exec bash "$COSMOS_ROOT/scripts/cosmos.sh"

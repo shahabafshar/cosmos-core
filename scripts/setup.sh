@@ -3,9 +3,9 @@
 # Exit on error
 set -e
 
-# Source configuration
-source config.sh
-source lib.sh
+SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPTS_DIR/config.sh"
+source "$SCRIPTS_DIR/lib.sh"
 
 # Function to install basic packages on a node
 install_packages() {

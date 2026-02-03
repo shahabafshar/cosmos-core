@@ -15,28 +15,33 @@ No test suites or role-specific daemons (AP/client/jammer) are included; you bui
 ./main.sh
 ```
 
-Menu options:
+All scripts except the entry point live in `scripts/`. The menu offers:
 
-1. **Initialize testbed** — Run `init.sh` (load image, power on nodes).
-2. **Setup nodes** — Run `setup.sh` (cleanup + install packages on all nodes).
-3. **About** — Short description.
-4. **Exit**
+1. **Configure node plan** — Turn nodes on/off for Init, Setup, Check.
+2. **Initialize testbed** — Load image, power on selected nodes.
+3. **Setup nodes** — Cleanup + install packages on selected nodes.
+4. **Check nodes** — Ping selected nodes (parallel).
+5. **Power off all nodes** — Shut down the grid.
+6. **About** — Credits and short description.
+7. **Exit**
 
-Manual usage:
+Manual usage (from repo root):
 
 ```bash
-./init.sh    # Initialize ORBIT testbed
-./setup.sh   # Setup all nodes (cleanup + packages)
+./main.sh                              # Start menu
+bash scripts/init.sh                   # Initialize ORBIT testbed (selected nodes)
+bash scripts/setup.sh                  # Setup selected nodes (cleanup + packages)
 ```
 
 ## Configuration
 
-Edit `config.sh`:
+Edit `scripts/config.sh`:
 
-- **NODES** — List of nodes (`hostname|ip|role|interface|network`). Same format as ORBITRON; roles are for your reference only (Cosmos Core does not configure AP/client/jammer).
-- **NETWORKS** — Optional; kept for compatibility or future use.
-- **PACKAGES** — Space-separated list of packages to install on every node (default: `iperf3 tmux`).
-- **SETUP_EXTRA_COMMANDS** — Optional array of shell commands to run on each node after package install. Uncomment and add as needed.
+- **NODE_HOSTNAMES** — Space-separated list of node hostnames. Which nodes are used is set in the menu (“Configure node plan”), not in the config.
+- **DEFAULT_INTERFACE** — Interface to reset during Setup (e.g. `wlan0`).
+- **PLAN_FILE** — File that stores which nodes are on (default: `.cosmos_plan` at repo root). Edit via the menu, not by hand.
+- **PACKAGES** — Space-separated list of packages to install on each node (default: `iperf3 tmux`).
+- **SETUP_EXTRA_COMMANDS** — Optional array of commands to run on each node after package install. Uncomment to use.
 
 ## Requirements
 

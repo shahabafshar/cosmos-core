@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# Run from repo root so .cosmos_plan, logs/, and script paths resolve
+COSMOS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$COSMOS_ROOT"
+source "$COSMOS_ROOT/scripts/config.sh"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -35,36 +40,60 @@ check_requirements() {
         echo -e "${RED}Missing: ${missing[*]}${NC}"
         return 1
     fi
-    [ -f "config.sh" ] || { echo -e "${RED}config.sh not found${NC}"; return 1; }
-    [ -d "logs" ] || mkdir -p "logs"
+    [ -f "$COSMOS_ROOT/scripts/config.sh" ] || { echo -e "${RED}config.sh not found${NC}"; return 1; }
+    [ -d "$LOG_DIR" ] || mkdir -p "$LOG_DIR"
     echo -e "${GREEN}OK${NC}"
     return 0
 }
 
 initialize_environment() {
     echo -e "\n${CYAN}Initializing ORBIT testbed...${NC}"
-    [ -f "init.sh" ] && bash init.sh || { echo -e "${RED}init.sh not found${NC}"; return 1; }
+    [ -f "$COSMOS_ROOT/scripts/init.sh" ] && bash "$COSMOS_ROOT/scripts/init.sh" || { echo -e "${RED}init.sh not found${NC}"; return 1; }
 }
 
 setup_nodes() {
     echo -e "\n${CYAN}Setting up nodes (cleanup + basic packages)...${NC}"
-    [ -f "setup.sh" ] && bash setup.sh || { echo -e "${RED}setup.sh not found${NC}"; return 1; }
+    [ -f "$COSMOS_ROOT/scripts/setup.sh" ] && bash "$COSMOS_ROOT/scripts/setup.sh" || { echo -e "${RED}setup.sh not found${NC}"; return 1; }
+}
+
+power_off_all_nodes() {
+    echo -e "\n${CYAN}Powering off all nodes in the grid...${NC}"
+    if ! command -v omf &>/dev/null; then
+        echo -e "${RED}omf not found${NC}"
+        return 1
+    fi
+    omf tell -a offh -t all
+    echo -e "${GREEN}All nodes powered off.${NC}"
+    return 0
 }
 
 check_nodes() {
-    echo -e "\n${CYAN}Checking nodes (ping)...${NC}"
-    [ -f "config.sh" ] || { echo -e "${RED}config.sh not found${NC}"; return 1; }
-    [ -f "lib.sh" ] || { echo -e "${RED}lib.sh not found${NC}"; return 1; }
-    source config.sh
-    source lib.sh
+    echo -e "\n${CYAN}Checking nodes (ping, in parallel)...${NC}"
+    [ -f "$COSMOS_ROOT/scripts/config.sh" ] || { echo -e "${RED}config.sh not found${NC}"; return 1; }
+    [ -f "$COSMOS_ROOT/scripts/lib.sh" ] || { echo -e "${RED}lib.sh not found${NC}"; return 1; }
+    source "$COSMOS_ROOT/scripts/config.sh"
+    source "$COSMOS_ROOT/scripts/lib.sh"
+    local tmpdir
+    tmpdir=$(mktemp -d) || { echo -e "${RED}Failed to create temp dir${NC}"; return 1; }
+    trap "rm -rf '$tmpdir'" RETURN
+    local pids=()
+    while IFS= read -r node_name; do
+        [ -z "$node_name" ] && continue
+        IFS='|' read -r hostname _ <<< "${NODES[$node_name]}"
+        ( ping -c 1 "$hostname" >/dev/null 2>&1; echo $? > "$tmpdir/$node_name" ) &
+        pids+=($!)
+    done < <(get_enabled_node_keys)
+    wait "${pids[@]}" 2>/dev/null
     local all_ok=true
     while IFS= read -r node_name; do
         [ -z "$node_name" ] && continue
         IFS='|' read -r hostname _ <<< "${NODES[$node_name]}"
-        if check_node "$hostname"; then
-            echo -e "${GREEN}  OK${NC} $hostname"
+        local code
+        code=$(cat "$tmpdir/$node_name" 2>/dev/null)
+        if [ "$code" = "0" ]; then
+            echo -e "${GREEN}  OK${NC}\t$hostname"
         else
-            echo -e "${RED}  FAIL${NC} $hostname"
+            echo -e "${RED}  FAIL${NC}\t$hostname"
             all_ok=false
         fi
     done < <(get_enabled_node_keys)
@@ -72,10 +101,10 @@ check_nodes() {
 }
 
 configure_node_plan() {
-    [ -f "config.sh" ] || { echo -e "${RED}config.sh not found${NC}"; return 1; }
-    [ -f "lib.sh" ] || { echo -e "${RED}lib.sh not found${NC}"; return 1; }
-    source config.sh
-    source lib.sh
+    [ -f "$COSMOS_ROOT/scripts/config.sh" ] || { echo -e "${RED}config.sh not found${NC}"; return 1; }
+    [ -f "$COSMOS_ROOT/scripts/lib.sh" ] || { echo -e "${RED}lib.sh not found${NC}"; return 1; }
+    source "$COSMOS_ROOT/scripts/config.sh"
+    source "$COSMOS_ROOT/scripts/lib.sh"
     local all_keys
     all_keys=($(printf '%s\n' "${!NODES[@]}" | sort -V))
     declare -A enabled
@@ -156,12 +185,13 @@ show_menu() {
     clear
     echo -e "$COSMOS_BANNER"
     echo -e "     ${YELLOW}╔══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "     ${YELLOW}║${NC}  ${CYAN}1.${NC} Initialize testbed (load image, power on nodes)      ${YELLOW}║${NC}"
-    echo -e "     ${YELLOW}║${NC}  ${CYAN}2.${NC} Setup nodes (cleanup + install basic packages)       ${YELLOW}║${NC}"
-    echo -e "     ${YELLOW}║${NC}  ${CYAN}3.${NC} Check nodes (ping reachability)                      ${YELLOW}║${NC}"
-    echo -e "     ${YELLOW}║${NC}  ${CYAN}4.${NC} Configure node plan (turn nodes on/off)              ${YELLOW}║${NC}"
-    echo -e "     ${YELLOW}║${NC}  ${CYAN}5.${NC} About Cosmos Core                                    ${YELLOW}║${NC}"
-    echo -e "     ${YELLOW}║${NC}  ${CYAN}6.${NC} Exit                                                 ${YELLOW}║${NC}"
+    echo -e "     ${YELLOW}║${NC}  ${CYAN}1.${NC} Configure node plan (turn nodes on/off)              ${YELLOW}║${NC}"
+    echo -e "     ${YELLOW}║${NC}  ${CYAN}2.${NC} Initialize testbed (load image, power on nodes)      ${YELLOW}║${NC}"
+    echo -e "     ${YELLOW}║${NC}  ${CYAN}3.${NC} Setup nodes (cleanup + install basic packages)       ${YELLOW}║${NC}"
+    echo -e "     ${YELLOW}║${NC}  ${CYAN}4.${NC} Check nodes (ping reachability)                      ${YELLOW}║${NC}"
+    echo -e "     ${YELLOW}║${NC}  ${CYAN}5.${NC} Power off all nodes                                  ${YELLOW}║${NC}"
+    echo -e "     ${YELLOW}║${NC}  ${CYAN}6.${NC} About Cosmos Core                                    ${YELLOW}║${NC}"
+    echo -e "     ${YELLOW}║${NC}  ${CYAN}7.${NC} Exit                                                 ${YELLOW}║${NC}"
     echo -e "     ${YELLOW}╚══════════════════════════════════════════════════════════╝${NC}"
     echo -e "\n${PURPLE}Choice: ${NC}"
 }
@@ -170,12 +200,13 @@ while true; do
     show_menu
     read -r choice
     case $choice in
-        1) check_requirements && initialize_environment ;;
-        2) check_requirements && setup_nodes ;;
-        3) check_requirements && check_nodes ;;
-        4) check_requirements && configure_node_plan ;;
-        5) show_about ; continue ;;
-        6) echo -e "\n${GREEN}Bye.${NC}"; exit 0 ;;
+        1) check_requirements && configure_node_plan ;;
+        2) check_requirements && initialize_environment ;;
+        3) check_requirements && setup_nodes ;;
+        4) check_requirements && check_nodes ;;
+        5) check_requirements && power_off_all_nodes ;;
+        6) show_about ; continue ;;
+        7) echo -e "\n${GREEN}Bye.${NC}"; exit 0 ;;
         *) echo -e "${RED}Invalid option.${NC}" ;;
     esac
     echo -e "\n${PURPLE}Press Enter for menu...${NC}"
