@@ -157,7 +157,24 @@ node_list=$(IFS=,; echo "${required_nodes[*]}")
 
 # --- Load image (capture output to parse for failures) ---
 echo -e "\n${CYAN}Loading image on ${#required_nodes[@]} nodes...${NC}"
-echo "  This may take several minutes. Watching for failures..."
+echo -e "  This typically takes 8-12 minutes. Watching for failures..."
+echo ""
+
+# Start elapsed timer in background
+imaging_start=$(date +%s)
+timer_pid=""
+(
+    while true; do
+        now=$(date +%s)
+        elapsed=$((now - imaging_start))
+        mins=$((elapsed / 60))
+        secs=$((elapsed % 60))
+        # Move cursor to beginning of line, print timer, clear rest of line
+        printf "\r  ${YELLOW}[Elapsed: %d:%02d]${NC} (~10 min total)   \033[K" "$mins" "$secs"
+        sleep 1
+    done
+) &
+timer_pid=$!
 
 # Run omf-5.4 load and capture output
 omf_output_file="$tmpdir/omf_output.txt"
@@ -165,6 +182,8 @@ set +e  # Don't exit on error here
 omf-5.4 load -i wifi-experiment.ndz -t "$node_list" 2>&1 | tee "$omf_output_file" | while IFS= read -r line; do
     # Filter out Ruby warnings
     echo "$line" | grep -q "^/.*warning:" && continue
+    # Clear timer line before printing output
+    printf "\r\033[K"
     # Highlight important messages
     if echo "$line" | grep -q "Giving up on node"; then
         failed_host=$(echo "$line" | grep -oP "node[0-9]+-[0-9]+\.[a-z0-9.-]+")
@@ -181,6 +200,18 @@ omf-5.4 load -i wifi-experiment.ndz -t "$node_list" 2>&1 | tee "$omf_output_file
 done
 omf_exit=$?
 set -e
+
+# Stop the timer
+[ -n "$timer_pid" ] && kill $timer_pid 2>/dev/null || true
+wait $timer_pid 2>/dev/null || true
+printf "\r\033[K"  # Clear timer line
+
+# Show imaging duration
+imaging_end=$(date +%s)
+imaging_elapsed=$((imaging_end - imaging_start))
+imaging_mins=$((imaging_elapsed / 60))
+imaging_secs=$((imaging_elapsed % 60))
+echo -e "  ${GREEN}Imaging completed in ${imaging_mins}m ${imaging_secs}s${NC}"
 
 # Parse OMF output for failures
 echo -e "\n${CYAN}Analyzing imaging results...${NC}"
@@ -235,13 +266,19 @@ omf tell -a on -t "$node_list" 2>&1 | grep -v "^/.*warning:" || true
 sleep 10
 
 # --- Final reachability check (parallel) ---
-echo -e "\n${CYAN}Verifying nodes are up...${NC}"
+echo -e "\n${CYAN}Verifying nodes are up (timeout: 5 min)...${NC}"
 timeout=300  # 5 minutes
 start_time=$(date +%s)
 final_ok=()
 final_fail=()
 
 while true; do
+    # Show elapsed time
+    current_time=$(date +%s)
+    elapsed=$((current_time - start_time))
+    mins=$((elapsed / 60))
+    secs=$((elapsed % 60))
+    
     pids=()
     for i in "${!successful_nodes[@]}"; do
         hostname="${successful_nodes[i]}"
@@ -256,23 +293,30 @@ while true; do
     done
     wait "${pids[@]}" 2>/dev/null || true
     
+    # Count how many are up
+    up_count=0
     all_up=true
     for i in "${!successful_nodes[@]}"; do
         status=$(cat "$tmpdir/final_$i" 2>/dev/null || echo "fail")
-        if [ "$status" != "ok" ]; then
+        if [ "$status" = "ok" ]; then
+            ((up_count++)) || true
+        else
             all_up=false
-            break
         fi
     done
     
+    # Show progress on same line
+    printf "\r  [Elapsed: %d:%02d] %d/%d nodes responding\033[K" "$mins" "$secs" "$up_count" "${#successful_nodes[@]}"
+    
     if $all_up; then
+        printf "\n"
+        echo -e "  ${GREEN}All nodes responding${NC}"
         break
     fi
     
-    current_time=$(date +%s)
-    elapsed=$((current_time - start_time))
     if [ $elapsed -ge $timeout ]; then
-        echo -e "${YELLOW}Timeout waiting for some nodes.${NC}"
+        printf "\n"
+        echo -e "  ${YELLOW}Timeout — some nodes did not respond${NC}"
         break
     fi
     
