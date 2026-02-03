@@ -1,0 +1,16 @@
+# IDE and editor
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Project
+logs/
+*.log
+
+# Temporary
+*.tmp
+*.bak
+*~
+Thumbs.db
