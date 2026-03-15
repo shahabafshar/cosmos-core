@@ -17,20 +17,20 @@
 #
 # LOG_DIR         — Directory for logs.
 #
-# IMAGING_TIMEOUT — Timeout for omf-5.4 load (imaging). Default 720s (12 min).
+# IMAGING_TIMEOUT — Timeout for omf load (imaging). Default 720s (12 min).
 # SETUP_TIMEOUT   — Timeout for setup operations. Default 300s (5 min).
 #
 # ======================================
 
 # Repo root (so paths work from scripts/ or root)
 COSMOS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PLAN_FILE="$COSMOS_ROOT/.cosmos_plan"
-NODES_CACHE="$COSMOS_ROOT/.cosmos_nodes"
-FAILED_NODES_FILE="$COSMOS_ROOT/.cosmos_failed"
 LOG_DIR="$COSMOS_ROOT/logs"
 
+# Site-specific files (set after site detection below)
+# PLAN_FILE, NODES_CACHE, FAILED_NODES_FILE are per-site
+
 # Timeouts (seconds)
-IMAGING_TIMEOUT=240      # 4 minutes for omf-5.4 load (working nodes finish in ~2 min)
+IMAGING_TIMEOUT=240      # 4 minutes for omf load (working nodes finish in ~2 min)
 SETUP_TIMEOUT=300        # 5 minutes for setup per-node operations
 
 # Source lib.sh for discovery functions (if not already sourced)
@@ -51,24 +51,31 @@ NODE_NAMES="$NODE_NAMES"
 EOF
 }
 
+# --- Detect site and set per-site file paths ---
+# Always detect site first (handles shared home dirs across ORBIT consoles)
+if detect_orbit_domain 2>/dev/null; then
+    : # SITE and NODE_DOMAIN are set
+else
+    # Fallback (change if you're on a different site)
+    SITE="outdoor"
+    NODE_DOMAIN="outdoor.orbit-lab.org"
+fi
+
+# Per-site files (e.g., .cosmos_nodes.outdoor, .cosmos_plan.sb4)
+NODES_CACHE="$COSMOS_ROOT/.cosmos_nodes.${SITE}"
+PLAN_FILE="$COSMOS_ROOT/.cosmos_plan.${SITE}"
+FAILED_NODES_FILE="$COSMOS_ROOT/.cosmos_failed.${SITE}"
+
 # --- Load from cache or discover ---
 # Skip if NODES is already populated (avoids re-discovery on re-source)
 if [ -z "${NODES+x}" ] || [ ${#NODES[@]} -eq 0 ]; then
     if [ -f "$NODES_CACHE" ]; then
-        # Load from cache
+        # Load from site-specific cache
         source "$NODES_CACHE"
         DISCOVERY_METHOD="${DISCOVERY_METHOD:-cached}"
     else
         # Fresh discovery
         DISCOVERY_METHOD=""
-        if detect_orbit_domain 2>/dev/null; then
-            : # NODE_DOMAIN and SITE are set
-        else
-            # Fallback domain (change if you're on a different site)
-            NODE_DOMAIN="outdoor.orbit-lab.org"
-            SITE="outdoor"
-        fi
-
         if discover_nodes 2>/dev/null && [ -n "$NODE_NAMES" ]; then
             : # NODE_NAMES is set by discover_nodes
         else

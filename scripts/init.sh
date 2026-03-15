@@ -129,14 +129,14 @@ cleanup_timer() {
 }
 trap cleanup_timer EXIT
 
-# Run omf-5.4 load with timeout - show output live AND save to file
+# Run omf load with timeout - show output live AND save to file
 omf_output_file="$tmpdir/omf_output.txt"
 set +e  # Don't exit on error here
 
 # Use timeout to hard-kill OMF if it exceeds our limit
 # Use stdbuf/grep --line-buffered to prevent output buffering
 timeout --signal=TERM --kill-after=10 $IMAGING_TIMEOUT \
-    stdbuf -oL omf-5.4 load -i wifi-experiment.ndz -t "$node_list" -o "$IMAGING_TIMEOUT" 2>&1 | \
+    stdbuf -oL omf load -i wifi-experiment.ndz -t "$node_list" -o "$IMAGING_TIMEOUT" 2>&1 | \
     grep --line-buffered -v "^/.*warning:" | \
     stdbuf -oL tee "$omf_output_file" | \
     while IFS= read -r line; do
@@ -257,7 +257,7 @@ if grep -q "mixed disk names were found" "$omf_output_file" 2>/dev/null; then
         sleep 5
         
         group_omf_output="$tmpdir/omf_group_${dtype//\//_}.txt"
-        if omf-5.4 load -i wifi-experiment.ndz -t "$group_list" -o "$IMAGING_TIMEOUT" 2>&1 | grep -v "^/.*warning:" | tee "$group_omf_output"; then
+        if omf load -i wifi-experiment.ndz -t "$group_list" -o "$IMAGING_TIMEOUT" 2>&1 | grep -v "^/.*warning:" | tee "$group_omf_output"; then
             # Check for failures in this group
             for j in "${!group_nodes[@]}"; do
                 gh="${group_nodes[j]}"

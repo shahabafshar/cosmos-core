@@ -43,7 +43,7 @@ ${CYAN}         ✦    ·    .         *         .    ·    ✦    .    *${NC}"
 
 check_requirements() {
     echo -e "\n${CYAN}Checking requirements...${NC}"
-    local required_commands=("ssh" "omf" "omf-5.4" "wget")
+    local required_commands=("ssh" "omf" "wget")
     local missing=()
     for cmd in "${required_commands[@]}"; do
         command -v "$cmd" &>/dev/null || missing+=("$cmd")

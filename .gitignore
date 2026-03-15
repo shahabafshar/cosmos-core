@@ -8,9 +8,9 @@
 # Project
 logs/
 *.log
-.cosmos_plan
-.cosmos_nodes
-.cosmos_failed
+.cosmos_plan*
+.cosmos_nodes*
+.cosmos_failed*
 
 # Temporary
 *.tmp

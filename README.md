@@ -47,7 +47,7 @@ All scripts except the entry point live in `scripts/`. The menu offers:
 6. **About** — Credits and short description.
 7. **Exit**
 
-> **Note:** Options 2-5 are disabled until you select nodes first (option 1). Your node selection is saved to `.cosmos_plan` (gitignored).
+> **Note:** Options 2-5 are disabled until you select nodes first (option 1). Your node selection is saved per-site (e.g., `.cosmos_plan.outdoor`).
 
 Manual usage (from repo root):
 
@@ -65,7 +65,7 @@ On startup, Cosmos automatically detects the ORBIT site (outdoor, sb1, etc.) and
 2. **ARP table** (fallback) — Parses `arp -a` if OMF fails (shows warning: may be incomplete).
 3. **Hardcoded** (fallback) — Uses the node list in `config.sh` if both methods fail.
 
-Discovered nodes are cached in `.cosmos_nodes`. Press `r` inside **Select nodes** to re-discover and update the cache.
+Discovered nodes are cached per-site (e.g., `.cosmos_nodes.outdoor`, `.cosmos_nodes.sb4`). This allows seamless switching between ORBIT consoles with shared home directories. Press `r` inside **Select nodes** to re-discover and update the cache.
 
 ## Failure handling
 
@@ -107,14 +107,14 @@ Edit `scripts/config.sh`:
 - **NODE_DOMAIN** — Auto-detected or set manually (e.g. `outdoor.orbit-lab.org`).
 - **NODE_NAMES** — Auto-discovered or hardcoded fallback list of short node names.
 - **DEFAULT_INTERFACE** — Interface to reset during Setup (e.g. `wlan0`).
-- **PLAN_FILE** — File that stores your node selection (default: `.cosmos_plan` at repo root, gitignored). Created via menu option 1.
+- **PLAN_FILE** — File that stores your node selection, per-site (e.g., `.cosmos_plan.outdoor`, gitignored). Created via menu option 1.
 - **PACKAGES** — Space-separated list of packages to install on each node (default: `iperf3 tmux`).
 - **SETUP_EXTRA_COMMANDS** — Optional array of commands to run on each node after package install.
 
 ## Requirements
 
 - ORBIT testbed access
-- On your machine: `ssh`, `omf`, `omf-5.4`, `wget`
+- On your machine: `ssh`, `omf`, `wget`
 
 ## License
 
