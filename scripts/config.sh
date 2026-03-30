@@ -30,7 +30,8 @@ LOG_DIR="$COSMOS_ROOT/logs"
 # PLAN_FILE, NODES_CACHE, FAILED_NODES_FILE are per-site
 
 # Timeouts (seconds)
-IMAGING_TIMEOUT=240      # 4 minutes for omf load (working nodes finish in ~2 min)
+# Keep imaging timeout aligned with OMF behavior; too low causes partial imaging and SSH auth issues later.
+IMAGING_TIMEOUT=800      # ~13m20s (OMF default)
 SETUP_TIMEOUT=300        # 5 minutes for setup per-node operations
 
 # Source lib.sh for discovery functions (if not already sourced)

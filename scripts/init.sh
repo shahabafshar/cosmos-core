@@ -82,7 +82,7 @@ IMAGING_TIMEOUT=${IMAGING_TIMEOUT:-720}
 
 echo -e "\n${CYAN}Loading image on ${#required_nodes[@]} nodes...${NC}"
 timeout_mins=$((IMAGING_TIMEOUT / 60))
-echo -e "  Timeout: ${timeout_mins} min (working nodes usually finish in ~2 min)"
+echo -e "  Timeout: ${timeout_mins} min"
 echo ""
 
 # Progress tracking
