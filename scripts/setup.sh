@@ -29,6 +29,10 @@ exec > >(tee >(sed 's/\x1b\[[0-9;]*m//g' >> "$LOG_FILE")) 2>&1
 # Timeout for setup operations (seconds)
 SETUP_TIMEOUT=300  # 5 minutes total
 
+# Remote SSH identity (can be overridden in config via SSH_USER)
+REMOTE_USER="${SSH_USER:-root}"
+REMOTE_SUDO=""
+
 # Setup a single node (cleanup + packages + extras)
 setup_single_node() {
     local hostname=$1
@@ -37,7 +41,7 @@ setup_single_node() {
     local status_file=$4
     
     echo "cleanup" > "$status_file"
-    timeout 30 ssh $SSH_OPTS "root@$hostname" "pkill -f hostapd || true; \
+    timeout 30 ssh $SSH_OPTS "${REMOTE_USER}@$hostname" "${REMOTE_SUDO}pkill -f hostapd || true; \
         pkill -f wpa_supplicant || true; \
         pkill -f mdk3 || true; \
         pkill -f aireplay-ng || true; \
@@ -47,7 +51,7 @@ setup_single_node() {
     echo "packages" > "$status_file"
     local success=false
     for i in {1..2}; do
-        if timeout 180 ssh $SSH_OPTS "root@$hostname" "DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq $PACKAGES >/dev/null 2>&1" 2>/dev/null; then
+        if timeout 180 ssh $SSH_OPTS "${REMOTE_USER}@$hostname" "${REMOTE_SUDO}DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 && ${REMOTE_SUDO}apt-get install -y -qq $PACKAGES >/dev/null 2>&1" 2>/dev/null; then
             success=true
             break
         fi
@@ -63,7 +67,7 @@ setup_single_node() {
     if [ -n "${SETUP_EXTRA_COMMANDS+x}" ] && [ ${#SETUP_EXTRA_COMMANDS[@]} -gt 0 ]; then
         echo "extras" > "$status_file"
         for cmd in "${SETUP_EXTRA_COMMANDS[@]}"; do
-            timeout 60 ssh $SSH_OPTS "root@$hostname" "$cmd" 2>/dev/null || true
+            timeout 60 ssh $SSH_OPTS "${REMOTE_USER}@$hostname" "${REMOTE_SUDO}$cmd" 2>/dev/null || true
         done
     fi
     
@@ -92,6 +96,19 @@ if [ ${#nodes_to_setup[@]} -eq 0 ]; then
     echo -e "${RED}No nodes to setup.${NC}"
     echo "Use 'Select nodes' to choose nodes, or refresh to clear failed status."
     exit 1
+fi
+
+# Detect usable SSH user before running checks.
+# Prefer configured user/root, fallback to current local user.
+probe_idx=0
+IFS='|' read -r probe_host _ <<< "${nodes_to_setup[$probe_idx]}"
+if ! ssh $SSH_OPTS "${REMOTE_USER}@$probe_host" "echo ok" >/dev/null 2>&1; then
+    local_user="$(whoami 2>/dev/null || echo "")"
+    if [ -n "$local_user" ] && ssh $SSH_OPTS "${local_user}@$probe_host" "echo ok" >/dev/null 2>&1; then
+        REMOTE_USER="$local_user"
+        REMOTE_SUDO="sudo -n "
+        echo -e "${YELLOW}Root SSH unavailable; using ${REMOTE_USER} with sudo.${NC}"
+    fi
 fi
 
 num_nodes=${#nodes_to_setup[@]}
@@ -136,6 +153,7 @@ draw_grid() {
                     "checking")    printf "%s: \033[0;36m%-11s\033[0m" "$name_fixed" "checking" ;;
                     "ready")       printf "%s: \033[0;32m%-11s\033[0m" "$name_fixed" "ready" ;;
                     "unreachable") printf "%s: \033[0;31m%-11s\033[0m" "$name_fixed" "unreachable" ;;
+        "ssh_wait")    printf "%s: \033[1;33m%-11s\033[0m" "$name_fixed" "ssh wait" ;;
                     "ssh_fail")    printf "%s: \033[0;31m%-11s\033[0m" "$name_fixed" "ssh fail" ;;
                     "cleanup")     printf "%s: \033[0;36m%-11s\033[0m" "$name_fixed" "cleanup" ;;
                     "packages")    printf "%s: \033[1;33m%-11s\033[0m" "$name_fixed" "packages" ;;
@@ -158,6 +176,9 @@ draw_grid 0
 start_time=$(date +%s)
 
 # Phase 1: Reachability + SSH check (parallel)
+# After imaging, nodes can be pingable before sshd is ready. Wait a bit for SSH.
+SSH_WAIT_TIMEOUT=${SSH_WAIT_TIMEOUT:-120}      # seconds
+SSH_RETRY_INTERVAL=${SSH_RETRY_INTERVAL:-5}    # seconds
 pids=()
 for i in "${!nodes_to_setup[@]}"; do
     IFS='|' read -r hostname _ <<< "${nodes_to_setup[i]}"
@@ -165,12 +186,24 @@ for i in "${!nodes_to_setup[@]}"; do
         if ! ping -c 1 -W 2 "$hostname" >/dev/null 2>&1; then
             echo "unreachable" > "$tmpdir/status_$i"
             echo "unreachable" > "$tmpdir/result_$i"
-        elif ! ssh $SSH_OPTS "root@$hostname" "echo ok" >/dev/null 2>&1; then
-            echo "ssh_fail" > "$tmpdir/status_$i"
-            echo "ssh_fail" > "$tmpdir/result_$i"
         else
-            echo "ready" > "$tmpdir/status_$i"
-            echo "ready" > "$tmpdir/result_$i"
+            echo "ssh_wait" > "$tmpdir/status_$i"
+            deadline=$(( $(date +%s) + SSH_WAIT_TIMEOUT ))
+            while true; do
+                # Try a lightweight SSH command. Capture error for diagnostics.
+                if ssh $SSH_OPTS "${REMOTE_USER}@$hostname" "echo ok" >/dev/null 2>"$tmpdir/ssh_err_$i"; then
+                    echo "ready" > "$tmpdir/status_$i"
+                    echo "ready" > "$tmpdir/result_$i"
+                    exit 0
+                fi
+                now=$(date +%s)
+                if [ "$now" -ge "$deadline" ]; then
+                    echo "ssh_fail" > "$tmpdir/status_$i"
+                    echo "ssh_fail" > "$tmpdir/result_$i"
+                    exit 0
+                fi
+                sleep "$SSH_RETRY_INTERVAL"
+            done
         fi
     ) &
     pids+=($!)
@@ -202,10 +235,8 @@ for i in "${!nodes_to_setup[@]}"; do
         reachable_indices+=("$i")
     elif [ "$result" = "ssh_fail" ]; then
         ((ssh_fail_count++)) || true
-        mark_node_failed "${node_keys[i]}"
     else
         ((unreachable_count++)) || true
-        mark_node_failed "${node_keys[i]}"
     fi
 done
 
@@ -216,7 +247,21 @@ draw_grid $elapsed
 
 if [ ${#reachable_indices[@]} -eq 0 ]; then
     echo -e "\n${RED}No reachable nodes. Aborting.${NC}"
-    [ $ssh_fail_count -gt 0 ] && echo -e "${YELLOW}SSH failures: Check keys or re-image with Init.${NC}"
+    if [ $ssh_fail_count -gt 0 ]; then
+        echo -e "${YELLOW}SSH failures.${NC} Common causes: missing key, wrong user, sshd not ready, or host key mismatch."
+        echo -e "${YELLOW}Last SSH errors (sample):${NC}"
+        shown=0
+        for i in "${!nodes_to_setup[@]}"; do
+            [ -f "$tmpdir/ssh_err_$i" ] || continue
+            err=$(tr -d '\r' < "$tmpdir/ssh_err_$i" 2>/dev/null | head -n 1)
+            [ -z "$err" ] && continue
+            IFS='|' read -r hostname _ <<< "${nodes_to_setup[i]}"
+            echo "  - ${hostname%%.*}: $err"
+            shown=$((shown+1))
+            [ $shown -ge 5 ] && break
+        done
+        echo -e "${YELLOW}Tip:${NC} If SSH works manually, we can adjust SSH user/opts in config."
+    fi
     exit 1
 fi
 

@@ -139,10 +139,11 @@ run_ssh_command() {
     local hostname=$1
     local command=$2
     local timeout_secs=${3:-0}
+    local ssh_user="${SSH_USER:-root}"
     if [ "$timeout_secs" -gt 0 ] 2>/dev/null; then
-        timeout "$timeout_secs" ssh $SSH_OPTS root@"$hostname" "$command"
+        timeout "$timeout_secs" ssh $SSH_OPTS "$ssh_user@$hostname" "$command"
     else
-        ssh $SSH_OPTS root@"$hostname" "$command"
+        ssh $SSH_OPTS "$ssh_user@$hostname" "$command"
     fi
 }
 
@@ -151,7 +152,8 @@ run_scp_command() {
     local source=$1
     local hostname=$2
     local destination=$3
-    scp $SSH_OPTS "$source" "root@$hostname:$destination"
+    local ssh_user="${SSH_USER:-root}"
+    scp $SSH_OPTS "$source" "$ssh_user@$hostname:$destination"
 }
 
 # Function to check if a node is reachable via ping

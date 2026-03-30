@@ -41,6 +41,9 @@ fi
 # Default interface for all nodes
 DEFAULT_INTERFACE="wlan0"
 
+# SSH user for node operations (setup/init helpers). Change if your key is not for root.
+SSH_USER="${SSH_USER:-root}"
+
 # Save nodes to cache file
 save_nodes_cache() {
     cat > "$NODES_CACHE" <<EOF
