@@ -165,11 +165,20 @@ omf_pid_file="$tmpdir/omf_pid"
             last_progress=$now
         fi
         
-        # Stall detection: if no progress for BOOT_STALL_TIMEOUT and enough nodes are up (uses OMF batch size only)
         stall_time=$((now - last_progress))
-        if [ -n "$omf_tot" ] && [ "$omf_tot" -ge 1 ] 2>/dev/null && [ "$nodes_up" -gt 0 ]; then
-            pct=$((nodes_up * 100 / omf_tot))
-            if [ "$stall_time" -ge "$BOOT_STALL_TIMEOUT" ] && [ "$pct" -ge "$BOOT_MIN_PERCENT" ] && [ "$nodes_up" -lt "$omf_tot" ]; then
+        if [ -n "$omf_tot" ] && [ "$omf_tot" -ge 1 ] 2>/dev/null; then
+            if [ "$nodes_up" -gt 0 ]; then
+                pct=$((nodes_up * 100 / omf_tot))
+            else
+                pct=0
+            fi
+            stall_ok=false
+            if [ "$nodes_up" -eq 0 ] && [ "$stall_time" -ge "$BOOT_STALL_TIMEOUT" ]; then
+                stall_ok=true
+            elif [ "$stall_time" -ge "$BOOT_STALL_TIMEOUT" ] && [ "$pct" -ge "$BOOT_MIN_PERCENT" ] && [ "$nodes_up" -lt "$omf_tot" ]; then
+                stall_ok=true
+            fi
+            if [ "$stall_ok" = "true" ]; then
                 # Stall detected! Kill omf process
                 if [ ! -f "$tmpdir/stall_triggered" ]; then
                     touch "$tmpdir/stall_triggered"
@@ -215,22 +224,20 @@ omf_pid_file="$tmpdir/omf_pid"
         fa_s=$(printf '%*s' "$fl" '' | tr ' ' 'x')
         bar_colored="${GREEN}${im_s}${YELLOW}${bo_s}${NC}${do_s}${RED}${fa_s}${NC}"
 
-        # Compact line with stall indicator.
-        # i = imaged (#), b = up-only (:), f = failed (x), w = waiting (.),
-        # /N = plan size (selected nodes), bt=M = current OMF batch size when known.
         flock 3
+        stats="${GREEN}%dok${NC}|${YELLOW}%dup${NC}|${RED}%dfail${NC}|%dwait"
         if [ -n "$omf_tot" ] && [ "$omf_tot" -ge 1 ] 2>/dev/null; then
             if [ "$stall_time" -ge 30 ] && [ "$nodes_up" -lt "$omf_tot" ]; then
-                printf "\r  ${YELLOW}[%d:%02d/%d:00]${NC} [%s] i%db%df%dw%d/%d bt%d ${RED}stall:%d/%ds${NC} ${CLR}" \
+                printf "\r  ${YELLOW}[%d:%02d/%d:00]${NC} [%s] ${stats}  %dnodes ${RED}stall:%d/%ds${NC}${CLR}" \
                     "$mins" "$secs" "$t_mins" "$bar_colored" \
-                    "$im" "$boot_only" "$fl" "$dot_count" "$total_nodes" "$omf_tot" "$stall_time" "$BOOT_STALL_TIMEOUT"
+                    "$im" "$boot_only" "$fl" "$dot_count" "$total_nodes" "$stall_time" "$BOOT_STALL_TIMEOUT"
             else
-                printf "\r  ${YELLOW}[%d:%02d/%d:00]${NC} [%s] i%db%df%dw%d/%d bt%d ${CLR}" \
+                printf "\r  ${YELLOW}[%d:%02d/%d:00]${NC} [%s] ${stats}  %dnodes${CLR}" \
                     "$mins" "$secs" "$t_mins" "$bar_colored" \
-                    "$im" "$boot_only" "$fl" "$dot_count" "$total_nodes" "$omf_tot"
+                    "$im" "$boot_only" "$fl" "$dot_count" "$total_nodes"
             fi
         else
-            printf "\r  ${YELLOW}[%d:%02d/%d:00]${NC} [%s] …p%d ${CLR}" \
+            printf "\r  ${YELLOW}[%d:%02d/%d:00]${NC} [%s] …%dnodes${CLR}" \
                 "$mins" "$secs" "$t_mins" "$bar_colored" "$total_nodes"
         fi
         flock -u 3
@@ -255,6 +262,7 @@ set +e  # Don't exit on error here
 
 # Run omf in background with output processing.
 (
+    set -o pipefail
     stdbuf -oL omf load -i wifi-experiment.ndz -t "$node_list" -o "$IMAGING_TIMEOUT" 2>&1 | \
     grep --line-buffered -v "^/.*warning:" | \
     stdbuf -oL tee "$omf_output_file" | \
@@ -365,8 +373,14 @@ imaging_end=$(date +%s)
 imaging_elapsed=$((imaging_end - imaging_start))
 imaging_mins=$((imaging_elapsed / 60))
 imaging_secs=$((imaging_elapsed % 60))
+all_failed_imaging=false
+if grep -qi "No nodes came online" "$omf_output_file" 2>/dev/null; then
+    all_failed_imaging=true
+fi
 if [ "$stall_aborted" -eq 1 ]; then
     echo -e "  ${YELLOW}Imaging stopped (stall) after ${imaging_mins}m ${imaging_secs}s${NC}"
+elif [ "$all_failed_imaging" = "true" ]; then
+    echo -e "  ${RED}Imaging failed — no nodes came online (${imaging_mins}m ${imaging_secs}s)${NC}"
 else
     echo -e "  ${GREEN}Imaging completed in ${imaging_mins}m ${imaging_secs}s${NC}"
 fi
@@ -543,22 +557,39 @@ echo -e "\n${CYAN}Analyzing imaging results...${NC}"
 imaging_failed=()
 imaging_failed_keys=()
 
-# Look for "Giving up on node X" messages
-while IFS= read -r line; do
-    if echo "$line" | grep -q "Giving up on node"; then
-        failed_host=$(echo "$line" | grep -oP "node[0-9]+-[0-9]+\.[a-z0-9.-]+" || true)
-        if [ -n "$failed_host" ]; then
-            imaging_failed+=("$failed_host")
-            # Find the key for this hostname
-            for i in "${!required_nodes[@]}"; do
-                if [ "${required_nodes[i]}" = "$failed_host" ]; then
-                    imaging_failed_keys+=("${node_keys[i]}")
-                    break
-                fi
-            done
+# If OMF reported "No nodes came online" or "N nodes failed to check in",
+# mark ALL batch nodes as failed since none were successfully imaged.
+if grep -qi "No nodes came online" "$omf_output_file" 2>/dev/null; then
+    checkin_fail_count=${#required_nodes[@]}
+elif grep -qP '[0-9]+ nodes? failed to check in' "$omf_output_file" 2>/dev/null; then
+    checkin_fail_count=$(grep -oP '[0-9]+(?= nodes? failed to check in)' "$omf_output_file" | head -1)
+    checkin_fail_count=${checkin_fail_count:-0}
+else
+    checkin_fail_count=0
+fi
+
+if [ "$checkin_fail_count" -ge "${#required_nodes[@]}" ] 2>/dev/null; then
+    for i in "${!required_nodes[@]}"; do
+        imaging_failed+=("${required_nodes[i]}")
+        imaging_failed_keys+=("${node_keys[i]}")
+    done
+else
+    # Look for individual "Giving up on node X" messages
+    while IFS= read -r line; do
+        if echo "$line" | grep -q "Giving up on node"; then
+            failed_host=$(echo "$line" | grep -oP "node[0-9]+-[0-9]+\.[a-z0-9.-]+" || true)
+            if [ -n "$failed_host" ]; then
+                imaging_failed+=("$failed_host")
+                for i in "${!required_nodes[@]}"; do
+                    if [ "${required_nodes[i]}" = "$failed_host" ]; then
+                        imaging_failed_keys+=("${node_keys[i]}")
+                        break
+                    fi
+                done
+            fi
         fi
-    fi
-done < "$omf_output_file"
+    done < "$omf_output_file"
+fi
 
 # Mark imaging failures
 for key in "${imaging_failed_keys[@]}"; do
@@ -627,7 +658,7 @@ if [ "$stall_aborted" -eq 1 ] && [ ${#successful_nodes[@]} -gt 1 ]; then
 fi
 
 node_list=$(IFS=,; echo "${successful_nodes[*]}")
-echo -e "\n${CYAN}Turning on ${#successful_nodes[@]} successfully imaged nodes...${NC}"
+echo -e "\n${CYAN}Turning on ${#successful_nodes[@]} surviving nodes...${NC}"
 omf tell -a on -t "$node_list" 2>&1 | grep -v "^/.*warning:" || true
 sleep 10
 
