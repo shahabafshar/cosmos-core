@@ -22,8 +22,8 @@
 # BOOT_MIN_PERCENT   — Minimum % of nodes online before stall detection kicks in. Default 50%.
 # SETUP_TIMEOUT      — Timeout for setup operations. Default 300s (5 min).
 #
-# IMAGING_MONITOR    — Set to 0 to disable the progress bar and stall detection during imaging.
-#                      OMF output is still shown. Default 1 (enabled).
+# STALL_DETECTION    — Set to 0 to disable stall detection (early abort when no progress).
+#                      Progress bar and elapsed timer are always shown. Default 1 (enabled).
 #
 # ======================================
 
@@ -39,7 +39,7 @@ IMAGING_TIMEOUT=800      # ~13m20s for full omf load (OMF default)
 BOOT_STALL_TIMEOUT=300   # If no new nodes come online for this long, stop waiting and continue
 BOOT_MIN_PERCENT=50      # Minimum % of nodes that must be online before stall timeout applies
 SETUP_TIMEOUT=300        # 5 minutes for setup per-node operations
-IMAGING_MONITOR=0        # Set to 0 to disable progress bar and stall detection during imaging
+STALL_DETECTION=0        # Set to 0 to disable stall detection (early abort when no progress)
 
 # Source lib.sh for discovery functions (if not already sourced)
 if ! declare -f discover_nodes &>/dev/null; then

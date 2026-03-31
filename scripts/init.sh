@@ -122,38 +122,36 @@ timeout_mins=$((IMAGING_TIMEOUT / 60))
 echo -e "  Timeout: ${timeout_mins} min"
 echo ""
 
-# Monitor mode (progress bar + stall detection). Disable with IMAGING_MONITOR=0 in config.sh.
-IMAGING_MONITOR=${IMAGING_MONITOR:-1}
+# Stall detection: disable with STALL_DETECTION=0 in config.sh.
+# Progress bar and elapsed timer are always shown.
+STALL_DETECTION=${STALL_DETECTION:-1}
 
 total_nodes=${#required_nodes[@]}
 
-if [ "$IMAGING_MONITOR" -eq 1 ]; then
-    # Progress tracking: bar denominator comes from OMF when it prints batch size (e.g. "onto 10 nodes").
-    # Plan size is NOT the same as OMF's current imaging batch — do not default the bar to plan count.
-    echo "0" > "$tmpdir/nodes_up"
-    echo "0" > "$tmpdir/nodes_imaged"
-    echo "0" > "$tmpdir/nodes_failed_bar"
-    echo "0" > "$tmpdir/last_nodes_up"
-    echo "$(date +%s)" > "$tmpdir/last_progress_time"
-    rm -f "$tmpdir/nodes_total_omf"
-    rm -f "$tmpdir/stall_triggered"
+# Progress tracking: bar denominator comes from OMF when it prints batch size (e.g. "onto 10 nodes").
+# Plan size is NOT the same as OMF's current imaging batch — do not default the bar to plan count.
+echo "0" > "$tmpdir/nodes_up"
+echo "0" > "$tmpdir/nodes_imaged"
+echo "0" > "$tmpdir/nodes_failed_bar"
+echo "0" > "$tmpdir/last_nodes_up"
+echo "$(date +%s)" > "$tmpdir/last_progress_time"
+rm -f "$tmpdir/nodes_total_omf"
+rm -f "$tmpdir/stall_triggered"
 
-    # Serialize TTY writes: background timer + OMF pipeline otherwise interleave and corrupt one line.
-    tty_lock="$tmpdir/imaging_tty.lock"
-    touch "$tty_lock"
-    exec 3>>"$tty_lock"
+# Serialize TTY writes: background timer + OMF pipeline otherwise interleave and corrupt one line.
+tty_lock="$tmpdir/imaging_tty.lock"
+touch "$tty_lock"
+exec 3>>"$tty_lock"
 
-    # Stall detection settings (from config.sh)
-    BOOT_STALL_TIMEOUT=${BOOT_STALL_TIMEOUT:-120}
-    BOOT_MIN_PERCENT=${BOOT_MIN_PERCENT:-50}
-fi
+# Stall detection settings (from config.sh)
+BOOT_STALL_TIMEOUT=${BOOT_STALL_TIMEOUT:-120}
+BOOT_MIN_PERCENT=${BOOT_MIN_PERCENT:-50}
 
 # Start elapsed timer with progress bar in background
 imaging_start=$(date +%s)
 timer_pid=""
 omf_pid_file="$tmpdir/omf_pid"
 
-if [ "$IMAGING_MONITOR" -eq 1 ]; then
 (
     t_mins=$((IMAGING_TIMEOUT / 60))
     while true; do
@@ -178,7 +176,7 @@ if [ "$IMAGING_MONITOR" -eq 1 ]; then
         fi
         
         stall_time=$((now - last_progress))
-        if [ -n "$omf_tot" ] && [ "$omf_tot" -ge 1 ] 2>/dev/null; then
+        if [ "$STALL_DETECTION" -eq 1 ] && [ -n "$omf_tot" ] && [ "$omf_tot" -ge 1 ] 2>/dev/null; then
             if [ "$nodes_up" -gt 0 ]; then
                 pct=$((nodes_up * 100 / omf_tot))
             else
@@ -210,15 +208,11 @@ if [ "$IMAGING_MONITOR" -eq 1 ]; then
             fi
         fi
 
-        # Bar width is always the *plan* size (total selected nodes).
-        # OMF's current batch size (omf_tot) is used for stall logic above, but we want failures (x)
-        # and successes (# / :) to be counted against the original selection, not just the active batch.
-        bar_w=$total_nodes
-
+        # Compute node counts for the bar
         im=$nodes_imaged
         up=$nodes_up
         fl=$nodes_failed
-        T=$bar_w
+        T=$total_nodes
         [ "$im" -gt "$T" ] && im=$T
         [ "$up" -gt "$T" ] && up=$T
         [ "$fl" -gt "$T" ] && fl=$T
@@ -230,16 +224,32 @@ if [ "$IMAGING_MONITOR" -eq 1 ]; then
         dot_count=$((T - im - boot_only - fl))
         [ "$dot_count" -lt 0 ] && dot_count=0
 
-        im_s=$(printf '%*s' "$im" '' | tr ' ' '#')
-        bo_s=$(printf '%*s' "$boot_only" '' | tr ' ' ':')
-        do_s=$(printf '%*s' "$dot_count" '' | tr ' ' '.')
-        fa_s=$(printf '%*s' "$fl" '' | tr ' ' 'x')
-        bar_colored="${GREEN}${im_s}${YELLOW}${bo_s}${NC}${do_s}${RED}${fa_s}${NC}"
+        if [ "$T" -le 20 ]; then
+            # Symbol mode: 1 char per node (#=imaged, :=booting, .=waiting, x=failed)
+            im_s=$(printf '%*s' "$im" '' | tr ' ' '#')
+            bo_s=$(printf '%*s' "$boot_only" '' | tr ' ' ':')
+            do_s=$(printf '%*s' "$dot_count" '' | tr ' ' '.')
+            fa_s=$(printf '%*s' "$fl" '' | tr ' ' 'x')
+            bar_colored="${GREEN}${im_s}${YELLOW}${bo_s}${NC}${do_s}${RED}${fa_s}${NC}"
+        else
+            # Scaled bar mode: fixed 20-char bar filled proportionally with block chars
+            BAR_W=20
+            b_im=$((im * BAR_W / T))
+            b_bo=$((boot_only * BAR_W / T))
+            b_fl=$((fl * BAR_W / T))
+            b_do=$((BAR_W - b_im - b_bo - b_fl))
+            [ "$b_do" -lt 0 ] && b_do=0
+            im_s=$(printf '%*s' "$b_im" '' | tr ' ' '█')
+            bo_s=$(printf '%*s' "$b_bo" '' | tr ' ' '▓')
+            do_s=$(printf '%*s' "$b_do" '' | tr ' ' '░')
+            fa_s=$(printf '%*s' "$b_fl" '' | tr ' ' '█')
+            bar_colored="${GREEN}${im_s}${YELLOW}${bo_s}${NC}${do_s}${RED}${fa_s}${NC}"
+        fi
 
         flock 3
         stats="${GREEN}%dok${NC}|${YELLOW}%dup${NC}|${RED}%dfail${NC}|%dwait"
         if [ -n "$omf_tot" ] && [ "$omf_tot" -ge 1 ] 2>/dev/null; then
-            if [ "$stall_time" -ge 30 ] && [ "$nodes_up" -lt "$omf_tot" ]; then
+            if [ "$STALL_DETECTION" -eq 1 ] && [ "$stall_time" -ge 30 ] && [ "$nodes_up" -lt "$omf_tot" ]; then
                 printf "\r  ${YELLOW}[%d:%02d/%d:00]${NC} [%s] ${stats}  %dnodes ${RED}stall:%d/%ds${NC}${CLR}" \
                     "$mins" "$secs" "$t_mins" "$bar_colored" \
                     "$im" "$boot_only" "$fl" "$dot_count" "$total_nodes" "$stall_time" "$BOOT_STALL_TIMEOUT"
@@ -257,7 +267,6 @@ if [ "$IMAGING_MONITOR" -eq 1 ]; then
     done
 ) &
 timer_pid=$!
-fi  # IMAGING_MONITOR
 
 # Ensure timer is killed on script exit (success or failure)
 cleanup_timer() {
@@ -275,9 +284,8 @@ trap 'cleanup_timer; rm -rf "$tmpdir"' EXIT
 omf_output_file="$tmpdir/omf_output.txt"
 set +e  # Don't exit on error here
 
-if [ "$IMAGING_MONITOR" -eq 1 ]; then
-    # --- Monitor mode: background output processing with progress bar + stall detection ---
-    (
+# Run omf in background with output processing.
+(
         set -o pipefail
         stdbuf -oL omf load -i wifi-experiment.ndz -t "$node_list" -o "$IMAGING_TIMEOUT" 2>&1 | \
         grep --line-buffered -v "^/.*warning:" | \
@@ -364,14 +372,6 @@ if [ "$IMAGING_MONITOR" -eq 1 ]; then
         omf_exit=0
     fi
 
-else
-    # --- Simple mode: just run omf load directly, no progress bar or stall detection ---
-    omf load -i wifi-experiment.ndz -t "$node_list" -o "$IMAGING_TIMEOUT" 2>&1 | \
-        grep --line-buffered -v "^/.*warning:" | \
-        tee "$omf_output_file"
-    omf_exit=${PIPESTATUS[0]}
-    stall_aborted=0
-fi  # IMAGING_MONITOR
 set -e
 
 # If imaging was interrupted due to overall timeout, stop here.
@@ -694,7 +694,7 @@ start_time=$(date +%s)
 final_ok=()
 final_fail=()
 
-# Stall detection for reachability:
+# Stall detection for reachability (only when STALL_DETECTION=1).
 # If the number of responding nodes stops increasing for BOOT_STALL_TIMEOUT and
 # we're already above BOOT_MIN_PERCENT of the candidate set, stop early.
 verify_last_up_count=0
@@ -741,20 +741,23 @@ while true; do
     fi
 
     verify_stall_time=$((current_time - verify_last_progress_time))
-    if [ "$candidate_total" -gt 0 ] 2>/dev/null; then
-        verify_pct=$((up_count * 100 / candidate_total))
-    else
-        verify_pct=0
-    fi
-    if [ "$all_up" = "false" ] && [ "$candidate_total" -gt 0 ] 2>/dev/null; then
-        if [ "$verify_stall_time" -ge "${BOOT_STALL_TIMEOUT:-120}" ] 2>/dev/null && [ "$verify_pct" -ge "${BOOT_MIN_PERCENT:-50}" ] 2>/dev/null; then
-            echo -e "\n  ${YELLOW}Stall detected: ${up_count}/${candidate_total} nodes responding, no improvement for ${verify_stall_time}s — proceeding${NC}"
-            break
+
+    if [ "$STALL_DETECTION" -eq 1 ]; then
+        if [ "$candidate_total" -gt 0 ] 2>/dev/null; then
+            verify_pct=$((up_count * 100 / candidate_total))
+        else
+            verify_pct=0
+        fi
+        if [ "$all_up" = "false" ] && [ "$candidate_total" -gt 0 ] 2>/dev/null; then
+            if [ "$verify_stall_time" -ge "${BOOT_STALL_TIMEOUT:-120}" ] 2>/dev/null && [ "$verify_pct" -ge "${BOOT_MIN_PERCENT:-50}" ] 2>/dev/null; then
+                echo -e "\n  ${YELLOW}Stall detected: ${up_count}/${candidate_total} nodes responding, no improvement for ${verify_stall_time}s — proceeding${NC}"
+                break
+            fi
         fi
     fi
-    
-    # Show progress on same line, with stall countdown when no progress
-    if [ "$verify_stall_time" -ge 10 ] && [ "$up_count" -gt 0 ] && [ "$all_up" = "false" ]; then
+
+    # Show progress on same line
+    if [ "$STALL_DETECTION" -eq 1 ] && [ "$verify_stall_time" -ge 10 ] && [ "$up_count" -gt 0 ] && [ "$all_up" = "false" ]; then
         printf "\r  [Elapsed: %d:%02d] %d/%d nodes responding ${RED}stall:%d/%ds${NC}${CLR}" \
             "$mins" "$secs" "$up_count" "${#successful_nodes[@]}" "$verify_stall_time" "${BOOT_STALL_TIMEOUT:-120}"
     else
