@@ -122,30 +122,38 @@ timeout_mins=$((IMAGING_TIMEOUT / 60))
 echo -e "  Timeout: ${timeout_mins} min"
 echo ""
 
-# Progress tracking: bar denominator comes from OMF when it prints batch size (e.g. "onto 10 nodes").
-# Plan size is NOT the same as OMF's current imaging batch — do not default the bar to plan count.
+# Monitor mode (progress bar + stall detection). Disable with IMAGING_MONITOR=0 in config.sh.
+IMAGING_MONITOR=${IMAGING_MONITOR:-1}
+
 total_nodes=${#required_nodes[@]}
-echo "0" > "$tmpdir/nodes_up"
-echo "0" > "$tmpdir/nodes_imaged"
-echo "0" > "$tmpdir/nodes_failed_bar"
-echo "0" > "$tmpdir/last_nodes_up"
-echo "$(date +%s)" > "$tmpdir/last_progress_time"
-rm -f "$tmpdir/nodes_total_omf"
-rm -f "$tmpdir/stall_triggered"
 
-# Serialize TTY writes: background timer + OMF pipeline otherwise interleave and corrupt one line.
-tty_lock="$tmpdir/imaging_tty.lock"
-touch "$tty_lock"
-exec 3>>"$tty_lock"
+if [ "$IMAGING_MONITOR" -eq 1 ]; then
+    # Progress tracking: bar denominator comes from OMF when it prints batch size (e.g. "onto 10 nodes").
+    # Plan size is NOT the same as OMF's current imaging batch — do not default the bar to plan count.
+    echo "0" > "$tmpdir/nodes_up"
+    echo "0" > "$tmpdir/nodes_imaged"
+    echo "0" > "$tmpdir/nodes_failed_bar"
+    echo "0" > "$tmpdir/last_nodes_up"
+    echo "$(date +%s)" > "$tmpdir/last_progress_time"
+    rm -f "$tmpdir/nodes_total_omf"
+    rm -f "$tmpdir/stall_triggered"
 
-# Stall detection settings (from config.sh)
-BOOT_STALL_TIMEOUT=${BOOT_STALL_TIMEOUT:-120}
-BOOT_MIN_PERCENT=${BOOT_MIN_PERCENT:-50}
+    # Serialize TTY writes: background timer + OMF pipeline otherwise interleave and corrupt one line.
+    tty_lock="$tmpdir/imaging_tty.lock"
+    touch "$tty_lock"
+    exec 3>>"$tty_lock"
+
+    # Stall detection settings (from config.sh)
+    BOOT_STALL_TIMEOUT=${BOOT_STALL_TIMEOUT:-120}
+    BOOT_MIN_PERCENT=${BOOT_MIN_PERCENT:-50}
+fi
 
 # Start elapsed timer with progress bar in background
 imaging_start=$(date +%s)
 timer_pid=""
 omf_pid_file="$tmpdir/omf_pid"
+
+if [ "$IMAGING_MONITOR" -eq 1 ]; then
 (
     t_mins=$((IMAGING_TIMEOUT / 60))
     while true; do
@@ -249,14 +257,17 @@ omf_pid_file="$tmpdir/omf_pid"
     done
 ) &
 timer_pid=$!
+fi  # IMAGING_MONITOR
 
 # Ensure timer is killed on script exit (success or failure)
 cleanup_timer() {
-    [ -n "$timer_pid" ] && kill $timer_pid 2>/dev/null || true
-    wait $timer_pid 2>/dev/null || true
-    flock 3
-    printf "\r${CLR}"
-    flock -u 3
+    if [ -n "$timer_pid" ]; then
+        kill $timer_pid 2>/dev/null || true
+        wait $timer_pid 2>/dev/null || true
+        flock 3
+        printf "\r${CLR}"
+        flock -u 3
+    fi
 }
 trap 'cleanup_timer; rm -rf "$tmpdir"' EXIT
 
@@ -264,93 +275,103 @@ trap 'cleanup_timer; rm -rf "$tmpdir"' EXIT
 omf_output_file="$tmpdir/omf_output.txt"
 set +e  # Don't exit on error here
 
-# Run omf in background with output processing.
-(
-    set -o pipefail
-    stdbuf -oL omf load -i wifi-experiment.ndz -t "$node_list" -o "$IMAGING_TIMEOUT" 2>&1 | \
-    grep --line-buffered -v "^/.*warning:" | \
-    stdbuf -oL tee "$omf_output_file" | \
-    while IFS= read -r line; do
-        # Update progress: legacy OMF 5.4 "Waiting for nodes (Up/Down/Total): U/..."
-        if echo "$line" | grep -q "Waiting for nodes"; then
-            up_count=$(echo "$line" | grep -oP '\): \K[0-9]+' || echo "0")
-            tot=$(echo "$line" | grep -oP '\): [0-9]+/[0-9]+/\K[0-9]+' || echo "")
-            [ -n "$up_count" ] && echo "$up_count" > "$tmpdir/nodes_up"
-            [ -n "$tot" ] && echo "$tot" > "$tmpdir/nodes_total_omf"
-        # Newer `omf load` UI: "Round 1: U/T nodes online" or "Loading disk image onto T nodes"
-        elif echo "$line" | grep -qE '^[[:space:]]*Round [0-9]+:[[:space:]]*[0-9]+/[0-9]+[[:space:]]+nodes online'; then
-            up_count=$(echo "$line" | grep -oP 'Round [0-9]+: \K[0-9]+' | head -1)
-            tot=$(echo "$line" | grep -oP 'Round [0-9]+: [0-9]+/\K[0-9]+' | head -1)
-            [ -n "$up_count" ] && echo "$up_count" > "$tmpdir/nodes_up"
-            [ -n "$tot" ] && echo "$tot" > "$tmpdir/nodes_total_omf"
-        elif echo "$line" | grep -qiP 'Loading disk image.*onto\s+[0-9]+\s+nodes'; then
-            tot=$(echo "$line" | grep -oiP 'onto\s+\K[0-9]+' | head -1)
-            if [ -n "$tot" ]; then
-                echo "$tot" > "$tmpdir/nodes_total_omf"
-                # Seed failure count once based on (plan - first-batch). This makes the bar
-                # immediately reflect nodes that never even entered the current imaging batch.
-                cur_fail=$(cat "$tmpdir/nodes_failed_bar" 2>/dev/null | tr -d ' \n\r' || echo "0")
-                [ -z "$cur_fail" ] && cur_fail=0
-                if [ "$total_nodes" -gt "$tot" ] 2>/dev/null; then
-                    target_fail=$((total_nodes - tot))
-                    # Don't decrease failures if we already counted some real "Giving up" events.
-                    if [ "$cur_fail" -lt "$target_fail" ] 2>/dev/null; then
-                        echo "$target_fail" > "$tmpdir/nodes_failed_bar"
+if [ "$IMAGING_MONITOR" -eq 1 ]; then
+    # --- Monitor mode: background output processing with progress bar + stall detection ---
+    (
+        set -o pipefail
+        stdbuf -oL omf load -i wifi-experiment.ndz -t "$node_list" -o "$IMAGING_TIMEOUT" 2>&1 | \
+        grep --line-buffered -v "^/.*warning:" | \
+        stdbuf -oL tee "$omf_output_file" | \
+        while IFS= read -r line; do
+            # Update progress: legacy OMF 5.4 "Waiting for nodes (Up/Down/Total): U/..."
+            if echo "$line" | grep -q "Waiting for nodes"; then
+                up_count=$(echo "$line" | grep -oP '\): \K[0-9]+' || echo "0")
+                tot=$(echo "$line" | grep -oP '\): [0-9]+/[0-9]+/\K[0-9]+' || echo "")
+                [ -n "$up_count" ] && echo "$up_count" > "$tmpdir/nodes_up"
+                [ -n "$tot" ] && echo "$tot" > "$tmpdir/nodes_total_omf"
+            # Newer `omf load` UI: "Round 1: U/T nodes online" or "Loading disk image onto T nodes"
+            elif echo "$line" | grep -qE '^[[:space:]]*Round [0-9]+:[[:space:]]*[0-9]+/[0-9]+[[:space:]]+nodes online'; then
+                up_count=$(echo "$line" | grep -oP 'Round [0-9]+: \K[0-9]+' | head -1)
+                tot=$(echo "$line" | grep -oP 'Round [0-9]+: [0-9]+/\K[0-9]+' | head -1)
+                [ -n "$up_count" ] && echo "$up_count" > "$tmpdir/nodes_up"
+                [ -n "$tot" ] && echo "$tot" > "$tmpdir/nodes_total_omf"
+            elif echo "$line" | grep -qiP 'Loading disk image.*onto\s+[0-9]+\s+nodes'; then
+                tot=$(echo "$line" | grep -oiP 'onto\s+\K[0-9]+' | head -1)
+                if [ -n "$tot" ]; then
+                    echo "$tot" > "$tmpdir/nodes_total_omf"
+                    # Seed failure count once based on (plan - first-batch). This makes the bar
+                    # immediately reflect nodes that never even entered the current imaging batch.
+                    cur_fail=$(cat "$tmpdir/nodes_failed_bar" 2>/dev/null | tr -d ' \n\r' || echo "0")
+                    [ -z "$cur_fail" ] && cur_fail=0
+                    if [ "$total_nodes" -gt "$tot" ] 2>/dev/null; then
+                        target_fail=$((total_nodes - tot))
+                        # Don't decrease failures if we already counted some real "Giving up" events.
+                        if [ "$cur_fail" -lt "$target_fail" ] 2>/dev/null; then
+                            echo "$target_fail" > "$tmpdir/nodes_failed_bar"
+                        fi
                     fi
                 fi
+            # OMF progress: first number inside Progress(...) is finished/imaged count (when present).
+            elif echo "$line" | grep -qP '(?i)Progress\s*\('; then
+                done_n=$(echo "$line" | grep -oP '(?i)Progress\s*\(\s*\K[0-9]+' | head -1)
+                [ -n "$done_n" ] && echo "$done_n" > "$tmpdir/nodes_imaged"
+            elif echo "$line" | grep -qi 'Giving up on node'; then
+                f=$(cat "$tmpdir/nodes_failed_bar" 2>/dev/null | tr -d ' \n\r' || echo "0")
+                [ -z "$f" ] && f=0
+                echo $((f + 1)) > "$tmpdir/nodes_failed_bar"
             fi
-        # OMF progress: first number inside Progress(...) is finished/imaged count (when present).
-        elif echo "$line" | grep -qP '(?i)Progress\s*\('; then
-            done_n=$(echo "$line" | grep -oP '(?i)Progress\s*\(\s*\K[0-9]+' | head -1)
-            [ -n "$done_n" ] && echo "$done_n" > "$tmpdir/nodes_imaged"
-        elif echo "$line" | grep -qi 'Giving up on node'; then
-            f=$(cat "$tmpdir/nodes_failed_bar" 2>/dev/null | tr -d ' \n\r' || echo "0")
-            [ -z "$f" ] && f=0
-            echo $((f + 1)) > "$tmpdir/nodes_failed_bar"
-        fi
-        # Print the line (clearing progress bar first, it will redraw)
-        flock 3
-        printf "\r${CLR}"
-        echo "$line"
-        flock -u 3
-    done
-) &
-omf_bg_pid=$!
-echo "$omf_bg_pid" > "$omf_pid_file"
+            # Print the line (clearing progress bar first, it will redraw)
+            flock 3
+            printf "\r${CLR}"
+            echo "$line"
+            flock -u 3
+        done
+    ) &
+    omf_bg_pid=$!
+    echo "$omf_bg_pid" > "$omf_pid_file"
 
-# Wait for omf to finish, with overall timeout
-wait_start=$(date +%s)
-omf_exit=0
-while kill -0 "$omf_bg_pid" 2>/dev/null; do
-    now=$(date +%s)
-    elapsed=$((now - wait_start))
-    if [ "$elapsed" -ge "$IMAGING_TIMEOUT" ]; then
-        flock 3
-        printf "\r${CLR}\n"
-        echo -e "  ${YELLOW}Overall timeout reached (${IMAGING_TIMEOUT}s) - stopping imaging${NC}"
-        flock -u 3
-        kill_tree "$omf_bg_pid" TERM
-        sleep 2
-        kill_tree "$omf_bg_pid" 9
-        omf_exit=124
-        break
-    fi
-    sleep 1
-done
-# Wait and suppress "Terminated" noise from killed pipeline
-wait "$omf_bg_pid" 2>/dev/null || omf_exit=$?
-# Ensure no orphans survive
-kill_tree "$omf_bg_pid" 9 2>/dev/null
-
-# Check if stall detection triggered the stop
-stall_aborted=0
-if [ -f "$tmpdir/stall_triggered" ]; then
-    # We killed `omf load` early, so we cannot reliably determine per-node imaging success.
-    # Instead of exiting, we continue with a conservative subset:
-    # we will later limit "turn on" candidates to the first OMF imaging batch size (T).
-    stall_aborted=1
+    # Wait for omf to finish, with overall timeout
+    wait_start=$(date +%s)
     omf_exit=0
-fi
+    while kill -0 "$omf_bg_pid" 2>/dev/null; do
+        now=$(date +%s)
+        elapsed=$((now - wait_start))
+        if [ "$elapsed" -ge "$IMAGING_TIMEOUT" ]; then
+            flock 3
+            printf "\r${CLR}\n"
+            echo -e "  ${YELLOW}Overall timeout reached (${IMAGING_TIMEOUT}s) - stopping imaging${NC}"
+            flock -u 3
+            kill_tree "$omf_bg_pid" TERM
+            sleep 2
+            kill_tree "$omf_bg_pid" 9
+            omf_exit=124
+            break
+        fi
+        sleep 1
+    done
+    # Wait and suppress "Terminated" noise from killed pipeline
+    wait "$omf_bg_pid" 2>/dev/null || omf_exit=$?
+    # Ensure no orphans survive
+    kill_tree "$omf_bg_pid" 9 2>/dev/null
+
+    # Check if stall detection triggered the stop
+    stall_aborted=0
+    if [ -f "$tmpdir/stall_triggered" ]; then
+        # We killed `omf load` early, so we cannot reliably determine per-node imaging success.
+        # Instead of exiting, we continue with a conservative subset:
+        # we will later limit "turn on" candidates to the first OMF imaging batch size (T).
+        stall_aborted=1
+        omf_exit=0
+    fi
+
+else
+    # --- Simple mode: just run omf load directly, no progress bar or stall detection ---
+    omf load -i wifi-experiment.ndz -t "$node_list" -o "$IMAGING_TIMEOUT" 2>&1 | \
+        grep --line-buffered -v "^/.*warning:" | \
+        tee "$omf_output_file"
+    omf_exit=${PIPESTATUS[0]}
+    stall_aborted=0
+fi  # IMAGING_MONITOR
 set -e
 
 # If imaging was interrupted due to overall timeout, stop here.
