@@ -86,14 +86,22 @@ detect_orbit_domain() {
 }
 
 # Discover nodes via OMF (primary method)
-# Output: space-separated short node names (e.g. node1-1 node1-2 ...)
+# Finds all imageable nodes (node*, mob*, sdr*, srv*) while excluding
+# RF devices (rfdev*) which have no CPU/disk and can't be imaged.
+# Output: space-separated short node names
 discover_nodes_omf() {
     local nodes
     if ! command -v omf &>/dev/null; then
         return 1
     fi
-    # Try omf stat to get node list
-    nodes=$(omf stat -t all 2>/dev/null | grep -oE 'node[0-9]+-[0-9]+' | sort -V | uniq | tr '\n' ' ')
+    # omf stat outputs lines like "node1-1.sb4.orbit-lab.org  State: POWERON"
+    # Extract the short hostname (everything before the first dot), then filter:
+    #   Include: node*, mob*, sdr*, srv*
+    #   Exclude: rfdev* (RF-only devices, not imageable)
+    nodes=$(omf stat -t all 2>/dev/null \
+        | grep -oE '(node|mob|sdr|srv)[a-zA-Z0-9_-]+' \
+        | grep -v '^rfdev' \
+        | sort -V | uniq | tr '\n' ' ')
     if [ -z "$nodes" ]; then
         return 1
     fi
@@ -106,8 +114,12 @@ discover_nodes_omf() {
 discover_nodes_arp() {
     local nodes domain_pattern
     domain_pattern="${NODE_DOMAIN:-orbit-lab.org}"
-    # Parse ARP table for node hostnames
-    nodes=$(arp -a 2>/dev/null | grep -oE "node[0-9]+-[0-9]+\.${domain_pattern//./\\.}" | sed 's/\..*//' | sort -V | uniq | tr '\n' ' ')
+    # Parse ARP table for hostnames, matching imageable node types
+    nodes=$(arp -a 2>/dev/null \
+        | grep -oE "(node|mob|sdr|srv)[a-zA-Z0-9_-]+\.${domain_pattern//./\\.}" \
+        | sed 's/\..*//' \
+        | grep -v '^rfdev' \
+        | sort -V | uniq | tr '\n' ' ')
     if [ -z "$nodes" ]; then
         return 1
     fi
