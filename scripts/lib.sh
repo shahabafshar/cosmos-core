@@ -57,20 +57,29 @@ log_msg() {
     [ -n "${LOG_FILE:-}" ] && echo "$msg" >> "$LOG_FILE"
 }
 
-# Detect ORBIT domain from console hostname (e.g. outdoor, sb1, sb2)
+# Detect ORBIT/COSMOS domain from console hostname (e.g. outdoor, sb1, bed)
 # Sets NODE_DOMAIN and SITE variables
+# Handles both orbit-lab.org and cosmos-lab.org consoles.
 detect_orbit_domain() {
-    local fqdn site
+    local fqdn site domain
     fqdn=$(hostname -f 2>/dev/null) || fqdn=$(hostname 2>/dev/null)
     # Extract site: e.g. console.outdoor.orbit-lab.org -> outdoor
-    site=$(echo "$fqdn" | grep -oE '\.(outdoor|sb[0-9]+)\.' | tr -d '.')
+    # Reservable ORBIT:  grid, intersection, outdoor, sb1-sb9
+    # Reservable COSMOS: bed, sb1, sb2, weeks, license
+    site=$(echo "$fqdn" | grep -oE '\.(grid|intersection|outdoor|sb[0-9]+|bed|weeks|license)\.' | tr -d '.')
     if [ -z "$site" ]; then
         # Fallback: try from domain
         site=$(hostname -d 2>/dev/null | cut -d. -f1)
     fi
     if [ -n "$site" ]; then
         SITE="$site"
-        NODE_DOMAIN="${site}.orbit-lab.org"
+        # Determine parent domain from FQDN (orbit-lab.org vs cosmos-lab.org)
+        if echo "$fqdn" | grep -q 'cosmos-lab\.org'; then
+            domain="cosmos-lab.org"
+        else
+            domain="orbit-lab.org"
+        fi
+        NODE_DOMAIN="${site}.${domain}"
         return 0
     fi
     return 1
