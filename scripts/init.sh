@@ -78,33 +78,37 @@ omf tell -a offh -t all 2>&1 | grep -v "^/.*warning:" || true
 printf '\n'
 sleep 5
 
-echo -e "\n${CYAN}Resetting attenuation matrix...${NC}"
-INSTR_BASE="http://internal2dmz.orbit-lab.org:5054/instr"
-response=$(wget -q -O- "${INSTR_BASE}/setAll?att=0" 2>/dev/null || echo "failed")
-if echo "$response" | grep -q "status='OK'"; then
-    echo -e "  ${GREEN}*${NC} Attenuation matrix reset (setAll)"
-else
-    # Avoid U+26A0 warning sign: many consoles render it as a wide emoji and clip the rest of the line.
-    echo -e "  ${YELLOW}!${NC} Attenuation matrix reset (setAll — response unclear or unreachable)"
-fi
-
-# ISU Lab 4 manual: select matrix devices on switches 3–6, port 1 (same sequence as manual wget steps).
-echo -e "  ${CYAN}Selecting matrix paths (selDevice switches 3–6)...${NC}"
-sel_ok=0
-for sw in 3 4 5 6; do
-    sel_r=$(wget -q -O- "${INSTR_BASE}/selDevice?switch=${sw}&port=1" 2>/dev/null || true)
-    if echo "$sel_r" | grep -q "status='OK'"; then
-        ((sel_ok++)) || true
+# Attenuation matrix reset — only sb4 has a programmable JFW attenuator matrix.
+if [ "${SITE:-}" = "sb4" ]; then
+    echo -e "\n${CYAN}Resetting attenuation matrix (sb4)...${NC}"
+    INSTR_BASE="http://internal2dmz.orbit-lab.org:5054/instr"
+    response=$(wget -q -O- "${INSTR_BASE}/setAll?att=0" 2>/dev/null || echo "failed")
+    if echo "$response" | grep -q "status='OK'"; then
+        echo -e "  ${GREEN}*${NC} Attenuation matrix reset (setAll)"
+    else
+        echo -e "  ${YELLOW}!${NC} Attenuation matrix reset (setAll — response unclear or unreachable)"
     fi
-done
-if [ "$sel_ok" -eq 4 ]; then
-    echo -e "  ${GREEN}*${NC} Matrix device selection OK (4/4)"
-elif [ "$sel_ok" -gt 0 ]; then
-    echo -e "  ${YELLOW}!${NC} Matrix device selection partial (${sel_ok}/4 reported OK)"
+
+    # Select WiFi adapters (port=1) on switches 3–6 (nodes with switchable WiFi/USRP hardware).
+    echo -e "  ${CYAN}Selecting matrix paths (selDevice switches 3–6)...${NC}"
+    sel_ok=0
+    for sw in 3 4 5 6; do
+        sel_r=$(wget -q -O- "${INSTR_BASE}/selDevice?switch=${sw}&port=1" 2>/dev/null || true)
+        if echo "$sel_r" | grep -q "status='OK'"; then
+            ((sel_ok++)) || true
+        fi
+    done
+    if [ "$sel_ok" -eq 4 ]; then
+        echo -e "  ${GREEN}*${NC} Matrix device selection OK (4/4)"
+    elif [ "$sel_ok" -gt 0 ]; then
+        echo -e "  ${YELLOW}!${NC} Matrix device selection partial (${sel_ok}/4 reported OK)"
+    else
+        echo -e "  ${YELLOW}!${NC} Matrix device selection failed or unreachable (0/4 OK — check console→internal2dmz:5054)"
+    fi
+    sleep 3
 else
-    echo -e "  ${YELLOW}!${NC} Matrix device selection failed or unreachable (0/4 OK — check console→internal2dmz:5054)"
+    echo -e "\n${YELLOW}Skipping attenuation matrix reset (not sb4)${NC}"
 fi
-sleep 3
 
 # Create comma-separated list of nodes
 node_list=$(IFS=,; echo "${required_nodes[*]}")
