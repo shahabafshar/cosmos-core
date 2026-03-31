@@ -172,9 +172,31 @@ configure_node_plan() {
             [ -n "${NODES[$k]+x}" ] && enabled[$k]=1
         done < "$PLAN_FILE"
     fi
-    local col_w=20 cols=3
+    # Dynamic layout: compute col width from longest node name, fit as many columns as terminal allows.
+    local max_name_len=0
+    for k in "${all_keys[@]}"; do
+        IFS='|' read -r hostname _ <<< "${NODES[$k]}"
+        local sn="${hostname%%.*}"
+        [ ${#sn} -gt "$max_name_len" ] && max_name_len=${#sn}
+    done
+    # Each cell: " NNN. [x] <name>  " — index(4) + ". [x] "(6) + name + padding(2)
+    local cell_w=$((max_name_len + 13))
+    local term_w
+    term_w=$(tput cols 2>/dev/null || echo 80)
+    local cols=$(( (term_w - 2) / cell_w ))
+    [ "$cols" -lt 1 ] && cols=1
+    [ "$cols" -gt 6 ] && cols=6
+
     local cursor=0  # Current cursor position (0-indexed)
     local total=${#all_keys[@]}
+
+    # Paging: compute visible rows from terminal height
+    local term_h page_offset=0
+    term_h=$(tput lines 2>/dev/null || echo 24)
+    # Reserve lines for: banner(~4) + header(2) + footer(5) + failed line(1) = ~12
+    local header_lines=12
+    local page_rows=$(( term_h - header_lines ))
+    [ "$page_rows" -lt 3 ] && page_rows=3
 
     # Function to draw the grid
     draw_grid() {
@@ -189,35 +211,69 @@ configure_node_plan() {
             cached)    method_label="loaded from cache (r to refresh)" ;;
             *)         method_label="unknown" ;;
         esac
-        echo -e "     ${CYAN}Site: ${SITE:-unknown} | Nodes: ${method_label} | Full name: <shortname>.${NODE_DOMAIN}${NC}\n"
-        local i idx idx_pad hostname short_name plain len pad k marker failed_count=0
-        for i in "${!all_keys[@]}"; do
+        echo -e "     ${CYAN}Site: ${SITE:-unknown} | Nodes: ${method_label} | Full name: <shortname>.${NODE_DOMAIN}${NC}"
+
+        # Count selected and failed for header summary
+        local sel_count=0 failed_count=0
+        for k in "${all_keys[@]}"; do
+            [ "${enabled[$k]}" -eq 1 ] 2>/dev/null && ((sel_count++)) || true
+            is_node_failed "$k" 2>/dev/null && [ "${unfail[$k]}" -ne 1 ] 2>/dev/null && ((failed_count++)) || true
+        done
+        echo -e "     ${GREEN}${sel_count} selected${NC} / ${total} total${failed_count:+  ${RED}${failed_count} failed${NC}}\n"
+
+        # Compute total grid rows and paging
+        local total_rows=$(( (total + cols - 1) / cols ))
+        local cursor_row=$((cursor / cols))
+
+        # Auto-scroll: ensure cursor row is visible
+        if [ "$cursor_row" -lt "$page_offset" ]; then
+            page_offset=$cursor_row
+        elif [ "$cursor_row" -ge $((page_offset + page_rows)) ]; then
+            page_offset=$((cursor_row - page_rows + 1))
+        fi
+
+        local start_idx=$((page_offset * cols))
+        local end_idx=$(( (page_offset + page_rows) * cols ))
+        [ "$end_idx" -gt "$total" ] && end_idx=$total
+
+        # Page indicator
+        if [ "$total_rows" -gt "$page_rows" ]; then
+            local cur_page=$((page_offset / page_rows + 1))
+            local total_pages=$(( (total_rows + page_rows - 1) / page_rows ))
+            echo -e "     ${CYAN}Page ${cur_page}/${total_pages}${NC} (${PURPLE}PgUp/PgDn${NC} to scroll)\n"
+        fi
+
+        local i idx idx_pad hostname short_name plain len pad k marker
+        for (( i=start_idx; i<end_idx; i++ )); do
             k="${all_keys[i]}"
             idx=$((i + 1))
-            idx_pad=$(printf "%2d" "$idx")
+            # Pad index to width of largest index number
+            if [ "$total" -ge 100 ]; then
+                idx_pad=$(printf "%3d" "$idx")
+            else
+                idx_pad=$(printf "%2d" "$idx")
+            fi
             IFS='|' read -r hostname _ <<< "${NODES[$k]}"
             short_name="${hostname%%.*}"
             # Cursor marker
             if [ "$i" -eq "$cursor" ]; then marker="${YELLOW}>${NC}"; else marker=" "; fi
             # Check if node is failed (and not marked for unfail)
             if is_node_failed "$k" 2>/dev/null && [ "${unfail[$k]}" -ne 1 ] 2>/dev/null; then
-                # Failed node - show as unavailable
                 plain="${idx_pad}. [!] ${short_name}"
                 len=${#plain}
-                pad=$((col_w - len - 1))
+                pad=$((cell_w - len - 1))
                 [ "$pad" -lt 0 ] && pad=0
                 echo -ne "    ${marker}${RED}${idx_pad}. [!] ${short_name}${NC}"
-                ((failed_count++)) || true
             elif [ "${enabled[$k]}" -eq 1 ] 2>/dev/null; then
                 plain="${idx_pad}. [x] ${short_name}"
                 len=${#plain}
-                pad=$((col_w - len - 1))
+                pad=$((cell_w - len - 1))
                 [ "$pad" -lt 0 ] && pad=0
                 echo -ne "    ${marker}${CYAN}${idx_pad}.${NC} [${GREEN}x${NC}] ${short_name}"
             else
                 plain="${idx_pad}. [ ] ${short_name}"
                 len=${#plain}
-                pad=$((col_w - len - 1))
+                pad=$((cell_w - len - 1))
                 [ "$pad" -lt 0 ] && pad=0
                 echo -ne "    ${marker}${CYAN}${idx_pad}.${NC} [${RED} ${NC}] ${short_name}"
             fi
@@ -231,16 +287,29 @@ configure_node_plan() {
         fi
         echo -e "\n     ${PURPLE}Arrows${NC} move   ${PURPLE}Space${NC} select/deselect   ${PURPLE}a${NC} All   ${PURPLE}n${NC} None   ${PURPLE}t${NC} Toggle all"
         echo -e "     ${PURPLE}s${NC} Save   ${PURPLE}q${NC} Quit   ${PURPLE}r${NC} Refresh (clears failed)   ${PURPLE}Numbers+Enter${NC} multi-select"
+        echo -e "     ${PURPLE}PgUp/PgDn${NC} page   ${PURPLE}Home/End${NC} jump"
     }
 
     while true; do
         draw_grid
-        # Read single key (handle escape sequences for arrows)
+        # Read single key (handle escape sequences for arrows, PgUp/Dn, Home/End)
         IFS= read -rsn1 key
         if [[ "$key" == $'\x1b' ]]; then
-            read -rsn2 -t 0.01 seq
-            key+="$seq"
+            read -rsn1 -t 0.01 seq1
+            if [[ "$seq1" == "[" ]]; then
+                read -rsn1 -t 0.01 seq2
+                # Extended sequences end with ~ (e.g. 5~ = PgUp, 6~ = PgDn, 1~ = Home, 4~ = End)
+                if [[ "$seq2" =~ [0-9] ]]; then
+                    read -rsn1 -t 0.01 seq3
+                    key=$'\x1b'"[${seq2}${seq3}"
+                else
+                    key=$'\x1b'"[${seq2}"
+                fi
+            else
+                key=$'\x1b'"${seq1}"
+            fi
         fi
+        local items_per_page=$((page_rows * cols))
         case "$key" in
             $'\x1b[A'|k) # Up
                 if [ "$cursor" -ge "$cols" ]; then ((cursor-=cols)); fi
@@ -253,6 +322,20 @@ configure_node_plan() {
                 ;;
             $'\x1b[D'|h) # Left
                 if [ "$cursor" -gt 0 ]; then ((cursor--)); fi
+                ;;
+            $'\x1b[5~') # PgUp
+                cursor=$((cursor - items_per_page))
+                [ "$cursor" -lt 0 ] && cursor=0
+                ;;
+            $'\x1b[6~') # PgDn
+                cursor=$((cursor + items_per_page))
+                [ "$cursor" -ge "$total" ] && cursor=$((total - 1))
+                ;;
+            $'\x1b[1~'|$'\x1b[H') # Home
+                cursor=0
+                ;;
+            $'\x1b[4~'|$'\x1b[F') # End
+                cursor=$((total - 1))
                 ;;
             ' ') # Space - select/deselect current node
                 k="${all_keys[cursor]}"
