@@ -7,12 +7,24 @@ SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPTS_DIR/config.sh"
 source "$SCRIPTS_DIR/lib.sh"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+# Colors (must be $'...' so ESC is a real byte; printf does not treat \033 like echo -e)
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[1;33m'
+CYAN=$'\033[0;36m'
+NC=$'\033[0m'
+CLR=$'\033[K'
+
+# Kill a process and all its descendants (handles the omf pipeline tree)
+kill_tree() {
+    local pid=$1 sig=${2:-TERM}
+    local children
+    children=$(ps -o pid= --ppid "$pid" 2>/dev/null) || true
+    for child in $children; do
+        kill_tree "$child" "$sig"
+    done
+    kill -"$sig" "$pid" 2>/dev/null || true
+}
 
 # Use session log if available, otherwise create own
 if [ -z "${LOG_FILE:-}" ]; then
@@ -57,19 +69,40 @@ init_start_time=$(date +%s)
 
 # Create temp directory for output files
 tmpdir=$(mktemp -d)
-trap "rm -rf '$tmpdir'" EXIT
+trap 'rm -rf "$tmpdir"' EXIT
 
 # --- Main initialization ---
 echo -e "\n${CYAN}Turning off all nodes...${NC}"
 omf tell -a offh -t all 2>&1 | grep -v "^/.*warning:" || true
+# OMF often uses CR-overwrite lines; force a real newline so the next echo is not drawn on top.
+printf '\n'
 sleep 5
 
 echo -e "\n${CYAN}Resetting attenuation matrix...${NC}"
-response=$(wget -q -O- "http://internal2dmz.orbit-lab.org:5054/instr/setAll?att=0" 2>/dev/null || echo "failed")
+INSTR_BASE="http://internal2dmz.orbit-lab.org:5054/instr"
+response=$(wget -q -O- "${INSTR_BASE}/setAll?att=0" 2>/dev/null || echo "failed")
 if echo "$response" | grep -q "status='OK'"; then
-    echo -e "  ${GREEN}✓${NC} Attenuation matrix reset"
+    echo -e "  ${GREEN}*${NC} Attenuation matrix reset (setAll)"
 else
-    echo -e "  ${YELLOW}⚠${NC} Attenuation matrix reset (response unclear)"
+    # Avoid U+26A0 warning sign: many consoles render it as a wide emoji and clip the rest of the line.
+    echo -e "  ${YELLOW}!${NC} Attenuation matrix reset (setAll — response unclear or unreachable)"
+fi
+
+# ISU Lab 4 manual: select matrix devices on switches 3–6, port 1 (same sequence as manual wget steps).
+echo -e "  ${CYAN}Selecting matrix paths (selDevice switches 3–6)...${NC}"
+sel_ok=0
+for sw in 3 4 5 6; do
+    sel_r=$(wget -q -O- "${INSTR_BASE}/selDevice?switch=${sw}&port=1" 2>/dev/null || true)
+    if echo "$sel_r" | grep -q "status='OK'"; then
+        ((sel_ok++)) || true
+    fi
+done
+if [ "$sel_ok" -eq 4 ]; then
+    echo -e "  ${GREEN}*${NC} Matrix device selection OK (4/4)"
+elif [ "$sel_ok" -gt 0 ]; then
+    echo -e "  ${YELLOW}!${NC} Matrix device selection partial (${sel_ok}/4 reported OK)"
+else
+    echo -e "  ${YELLOW}!${NC} Matrix device selection failed or unreachable (0/4 OK — check console→internal2dmz:5054)"
 fi
 sleep 3
 
@@ -85,13 +118,30 @@ timeout_mins=$((IMAGING_TIMEOUT / 60))
 echo -e "  Timeout: ${timeout_mins} min"
 echo ""
 
-# Progress tracking
+# Progress tracking: bar denominator comes from OMF when it prints batch size (e.g. "onto 10 nodes").
+# Plan size is NOT the same as OMF's current imaging batch — do not default the bar to plan count.
 total_nodes=${#required_nodes[@]}
 echo "0" > "$tmpdir/nodes_up"
+echo "0" > "$tmpdir/nodes_imaged"
+echo "0" > "$tmpdir/nodes_failed_bar"
+echo "0" > "$tmpdir/last_nodes_up"
+echo "$(date +%s)" > "$tmpdir/last_progress_time"
+rm -f "$tmpdir/nodes_total_omf"
+rm -f "$tmpdir/stall_triggered"
+
+# Serialize TTY writes: background timer + OMF pipeline otherwise interleave and corrupt one line.
+tty_lock="$tmpdir/imaging_tty.lock"
+touch "$tty_lock"
+exec 3>>"$tty_lock"
+
+# Stall detection settings (from config.sh)
+BOOT_STALL_TIMEOUT=${BOOT_STALL_TIMEOUT:-120}
+BOOT_MIN_PERCENT=${BOOT_MIN_PERCENT:-50}
 
 # Start elapsed timer with progress bar in background
 imaging_start=$(date +%s)
 timer_pid=""
+omf_pid_file="$tmpdir/omf_pid"
 (
     t_mins=$((IMAGING_TIMEOUT / 60))
     while true; do
@@ -100,22 +150,90 @@ timer_pid=""
         mins=$((elapsed / 60))
         secs=$((elapsed % 60))
         
-        # Read current progress
-        nodes_up=$(cat "$tmpdir/nodes_up" 2>/dev/null || echo "0")
+        # Read current progress; tr -dc strips any \r / whitespace OMF leaves behind
+        nodes_up=$(cat "$tmpdir/nodes_up" 2>/dev/null | tr -dc '0-9');       nodes_up=${nodes_up:-0}
+        nodes_imaged=$(cat "$tmpdir/nodes_imaged" 2>/dev/null | tr -dc '0-9'); nodes_imaged=${nodes_imaged:-0}
+        nodes_failed=$(cat "$tmpdir/nodes_failed_bar" 2>/dev/null | tr -dc '0-9'); nodes_failed=${nodes_failed:-0}
+        omf_tot=$(cat "$tmpdir/nodes_total_omf" 2>/dev/null | tr -dc '0-9');  omf_tot=${omf_tot:-}
+        last_up=$(cat "$tmpdir/last_nodes_up" 2>/dev/null | tr -dc '0-9');   last_up=${last_up:-0}
+        last_progress=$(cat "$tmpdir/last_progress_time" 2>/dev/null | tr -dc '0-9'); last_progress=${last_progress:-$now}
         
-        # Build progress bar: [####.........] format
-        bar=""
-        for ((i=0; i<total_nodes; i++)); do
-            if [ $i -lt $nodes_up ]; then
-                bar="${bar}#"
-            else
-                bar="${bar}."
+        # Track progress changes for stall detection
+        if [ "$nodes_up" != "$last_up" ]; then
+            echo "$nodes_up" > "$tmpdir/last_nodes_up"
+            echo "$now" > "$tmpdir/last_progress_time"
+            last_progress=$now
+        fi
+        
+        # Stall detection: if no progress for BOOT_STALL_TIMEOUT and enough nodes are up (uses OMF batch size only)
+        stall_time=$((now - last_progress))
+        if [ -n "$omf_tot" ] && [ "$omf_tot" -ge 1 ] 2>/dev/null && [ "$nodes_up" -gt 0 ]; then
+            pct=$((nodes_up * 100 / omf_tot))
+            if [ "$stall_time" -ge "$BOOT_STALL_TIMEOUT" ] && [ "$pct" -ge "$BOOT_MIN_PERCENT" ] && [ "$nodes_up" -lt "$omf_tot" ]; then
+                # Stall detected! Kill omf process
+                if [ ! -f "$tmpdir/stall_triggered" ]; then
+                    touch "$tmpdir/stall_triggered"
+                    omf_pid=$(cat "$omf_pid_file" 2>/dev/null || echo "")
+                    if [ -n "$omf_pid" ]; then
+                        flock 3
+                        printf "\r${CLR}\n"
+                        printf "  ${YELLOW}Stall detected: %d/%d nodes up, no progress for %ds — stopping${NC}\n" \
+                            "$nodes_up" "$omf_tot" "$stall_time"
+                        flock -u 3
+                        # Kill the entire process tree (omf load + grep + tee + while read)
+                        kill_tree "$omf_pid" TERM
+                        sleep 2
+                        kill_tree "$omf_pid" 9
+                    fi
+                fi
             fi
-        done
-        
-        # Format: [1:30 / 4:00] [####.........] 4/13
-        printf "\r  ${YELLOW}[%d:%02d / %d:00]${NC} ${GREEN}[%s]${NC} %d/%d   \033[K" \
-            "$mins" "$secs" "$t_mins" "$bar" "$nodes_up" "$total_nodes"
+        fi
+
+        # Bar width is always the *plan* size (total selected nodes).
+        # OMF's current batch size (omf_tot) is used for stall logic above, but we want failures (x)
+        # and successes (# / :) to be counted against the original selection, not just the active batch.
+        bar_w=$total_nodes
+
+        im=$nodes_imaged
+        up=$nodes_up
+        fl=$nodes_failed
+        T=$bar_w
+        [ "$im" -gt "$T" ] && im=$T
+        [ "$up" -gt "$T" ] && up=$T
+        [ "$fl" -gt "$T" ] && fl=$T
+        boot_only=$((up - im))
+        [ "$boot_only" -lt 0 ] && boot_only=0
+        max_boot=$((T - im - fl))
+        [ "$max_boot" -lt 0 ] && max_boot=0
+        [ "$boot_only" -gt "$max_boot" ] && boot_only=$max_boot
+        dot_count=$((T - im - boot_only - fl))
+        [ "$dot_count" -lt 0 ] && dot_count=0
+
+        im_s=$(printf '%*s' "$im" '' | tr ' ' '#')
+        bo_s=$(printf '%*s' "$boot_only" '' | tr ' ' ':')
+        do_s=$(printf '%*s' "$dot_count" '' | tr ' ' '.')
+        fa_s=$(printf '%*s' "$fl" '' | tr ' ' 'x')
+        bar_colored="${GREEN}${im_s}${YELLOW}${bo_s}${NC}${do_s}${RED}${fa_s}${NC}"
+
+        # Compact line with stall indicator.
+        # i = imaged (#), b = up-only (:), f = failed (x), w = waiting (.),
+        # /N = plan size (selected nodes), bt=M = current OMF batch size when known.
+        flock 3
+        if [ -n "$omf_tot" ] && [ "$omf_tot" -ge 1 ] 2>/dev/null; then
+            if [ "$stall_time" -ge 30 ] && [ "$nodes_up" -lt "$omf_tot" ]; then
+                printf "\r  ${YELLOW}[%d:%02d/%d:00]${NC} [%s] i%db%df%dw%d/%d bt%d ${RED}stall:%d/%ds${NC} ${CLR}" \
+                    "$mins" "$secs" "$t_mins" "$bar_colored" \
+                    "$im" "$boot_only" "$fl" "$dot_count" "$total_nodes" "$omf_tot" "$stall_time" "$BOOT_STALL_TIMEOUT"
+            else
+                printf "\r  ${YELLOW}[%d:%02d/%d:00]${NC} [%s] i%db%df%dw%d/%d bt%d ${CLR}" \
+                    "$mins" "$secs" "$t_mins" "$bar_colored" \
+                    "$im" "$boot_only" "$fl" "$dot_count" "$total_nodes" "$omf_tot"
+            fi
+        else
+            printf "\r  ${YELLOW}[%d:%02d/%d:00]${NC} [%s] …p%d ${CLR}" \
+                "$mins" "$secs" "$t_mins" "$bar_colored" "$total_nodes"
+        fi
+        flock -u 3
         sleep 1
     done
 ) &
@@ -125,39 +243,118 @@ timer_pid=$!
 cleanup_timer() {
     [ -n "$timer_pid" ] && kill $timer_pid 2>/dev/null || true
     wait $timer_pid 2>/dev/null || true
-    printf "\r\033[K"
+    flock 3
+    printf "\r${CLR}"
+    flock -u 3
 }
-trap cleanup_timer EXIT
+trap 'cleanup_timer; rm -rf "$tmpdir"' EXIT
 
-# Run omf load with timeout - show output live AND save to file
+# Run omf load - save output and track PID for stall detection
 omf_output_file="$tmpdir/omf_output.txt"
 set +e  # Don't exit on error here
 
-# Use timeout to hard-kill OMF if it exceeds our limit
-# Use stdbuf/grep --line-buffered to prevent output buffering
-timeout --signal=TERM --kill-after=10 $IMAGING_TIMEOUT \
+# Run omf in background with output processing.
+(
     stdbuf -oL omf load -i wifi-experiment.ndz -t "$node_list" -o "$IMAGING_TIMEOUT" 2>&1 | \
     grep --line-buffered -v "^/.*warning:" | \
     stdbuf -oL tee "$omf_output_file" | \
     while IFS= read -r line; do
-        # Update progress from "Waiting for nodes" lines
+        # Update progress: legacy OMF 5.4 "Waiting for nodes (Up/Down/Total): U/..."
         if echo "$line" | grep -q "Waiting for nodes"; then
             up_count=$(echo "$line" | grep -oP '\): \K[0-9]+' || echo "0")
+            tot=$(echo "$line" | grep -oP '\): [0-9]+/[0-9]+/\K[0-9]+' || echo "")
             [ -n "$up_count" ] && echo "$up_count" > "$tmpdir/nodes_up"
+            [ -n "$tot" ] && echo "$tot" > "$tmpdir/nodes_total_omf"
+        # Newer `omf load` UI: "Round 1: U/T nodes online" or "Loading disk image onto T nodes"
+        elif echo "$line" | grep -qE '^[[:space:]]*Round [0-9]+:[[:space:]]*[0-9]+/[0-9]+[[:space:]]+nodes online'; then
+            up_count=$(echo "$line" | grep -oP 'Round [0-9]+: \K[0-9]+' | head -1)
+            tot=$(echo "$line" | grep -oP 'Round [0-9]+: [0-9]+/\K[0-9]+' | head -1)
+            [ -n "$up_count" ] && echo "$up_count" > "$tmpdir/nodes_up"
+            [ -n "$tot" ] && echo "$tot" > "$tmpdir/nodes_total_omf"
+        elif echo "$line" | grep -qiP 'Loading disk image.*onto\s+[0-9]+\s+nodes'; then
+            tot=$(echo "$line" | grep -oiP 'onto\s+\K[0-9]+' | head -1)
+            if [ -n "$tot" ]; then
+                echo "$tot" > "$tmpdir/nodes_total_omf"
+                # Seed failure count once based on (plan - first-batch). This makes the bar
+                # immediately reflect nodes that never even entered the current imaging batch.
+                cur_fail=$(cat "$tmpdir/nodes_failed_bar" 2>/dev/null | tr -d ' \n\r' || echo "0")
+                [ -z "$cur_fail" ] && cur_fail=0
+                if [ "$total_nodes" -gt "$tot" ] 2>/dev/null; then
+                    target_fail=$((total_nodes - tot))
+                    # Don't decrease failures if we already counted some real "Giving up" events.
+                    if [ "$cur_fail" -lt "$target_fail" ] 2>/dev/null; then
+                        echo "$target_fail" > "$tmpdir/nodes_failed_bar"
+                    fi
+                fi
+            fi
+        # OMF progress: first number inside Progress(...) is finished/imaged count (when present).
+        elif echo "$line" | grep -qP '(?i)Progress\s*\('; then
+            done_n=$(echo "$line" | grep -oP '(?i)Progress\s*\(\s*\K[0-9]+' | head -1)
+            [ -n "$done_n" ] && echo "$done_n" > "$tmpdir/nodes_imaged"
+        elif echo "$line" | grep -qi 'Giving up on node'; then
+            f=$(cat "$tmpdir/nodes_failed_bar" 2>/dev/null | tr -d ' \n\r' || echo "0")
+            [ -z "$f" ] && f=0
+            echo $((f + 1)) > "$tmpdir/nodes_failed_bar"
         fi
         # Print the line (clearing progress bar first, it will redraw)
-        printf "\r\033[K"
+        flock 3
+        printf "\r${CLR}"
         echo "$line"
+        flock -u 3
     done
-omf_exit=${PIPESTATUS[0]}
+) &
+omf_bg_pid=$!
+echo "$omf_bg_pid" > "$omf_pid_file"
 
-# Check if we timed out
-if [ $omf_exit -eq 124 ] || [ $omf_exit -eq 137 ]; then
-    printf "\r\033[K"
-    echo -e "  ${YELLOW}⚠ Timeout reached - stopping imaging${NC}"
+# Wait for omf to finish, with overall timeout
+wait_start=$(date +%s)
+omf_exit=0
+while kill -0 "$omf_bg_pid" 2>/dev/null; do
+    now=$(date +%s)
+    elapsed=$((now - wait_start))
+    if [ "$elapsed" -ge "$IMAGING_TIMEOUT" ]; then
+        flock 3
+        printf "\r${CLR}\n"
+        echo -e "  ${YELLOW}Overall timeout reached (${IMAGING_TIMEOUT}s) - stopping imaging${NC}"
+        flock -u 3
+        kill_tree "$omf_bg_pid" TERM
+        sleep 2
+        kill_tree "$omf_bg_pid" 9
+        omf_exit=124
+        break
+    fi
+    sleep 1
+done
+# Wait and suppress "Terminated" noise from killed pipeline
+wait "$omf_bg_pid" 2>/dev/null || omf_exit=$?
+# Ensure no orphans survive
+kill_tree "$omf_bg_pid" 9 2>/dev/null
+
+# Check if stall detection triggered the stop
+stall_aborted=0
+if [ -f "$tmpdir/stall_triggered" ]; then
+    # We killed `omf load` early, so we cannot reliably determine per-node imaging success.
+    # Instead of exiting, we continue with a conservative subset:
+    # we will later limit "turn on" candidates to the first OMF imaging batch size (T).
+    stall_aborted=1
+    omf_exit=0
 fi
-omf_exit=${PIPESTATUS[0]}
 set -e
+
+# If imaging was interrupted due to overall timeout, stop here.
+if [ "$omf_exit" -ne 0 ]; then
+    # Stop the timer (if still running)
+    cleanup_timer
+    timer_pid=""  # Prevent double-kill in trap
+
+    imaging_end=$(date +%s)
+    imaging_elapsed=$((imaging_end - imaging_start))
+    imaging_mins=$((imaging_elapsed / 60))
+    imaging_secs=$((imaging_elapsed % 60))
+
+    echo -e "  ${YELLOW}Imaging interrupted (exit=$omf_exit) after ${imaging_mins}m ${imaging_secs}s — not powering on unknown-imaged nodes${NC}"
+    exit 1
+fi
 
 # Stop the timer
 cleanup_timer
@@ -168,7 +365,50 @@ imaging_end=$(date +%s)
 imaging_elapsed=$((imaging_end - imaging_start))
 imaging_mins=$((imaging_elapsed / 60))
 imaging_secs=$((imaging_elapsed % 60))
-echo -e "  ${GREEN}Imaging completed in ${imaging_mins}m ${imaging_secs}s${NC}"
+if [ "$stall_aborted" -eq 1 ]; then
+    echo -e "  ${YELLOW}Imaging stopped (stall) after ${imaging_mins}m ${imaging_secs}s${NC}"
+else
+    echo -e "  ${GREEN}Imaging completed in ${imaging_mins}m ${imaging_secs}s${NC}"
+fi
+
+# Conservative continuation after stall: limit candidates to first OMF batch
+if [ "$stall_aborted" -eq 1 ]; then
+    batch_size=$(cat "$tmpdir/nodes_total_omf" 2>/dev/null || echo "")
+    if [ -n "$batch_size" ] && [ "$batch_size" -ge 1 ] 2>/dev/null && [ "$batch_size" -lt "$total_nodes" ] 2>/dev/null; then
+        # Mark the nodes that were never in OMF's batch as failed, then slice.
+        dropped=0
+        for (( i=batch_size; i<${#node_keys[@]}; i++ )); do
+            mark_node_failed "${node_keys[i]}"
+            ((dropped++)) || true
+        done
+        required_nodes=("${required_nodes[@]:0:$batch_size}")
+        node_keys=("${node_keys[@]:0:$batch_size}")
+        total_nodes=${#required_nodes[@]}
+        echo -e "  ${YELLOW}Stall: continuing with ${batch_size} batch nodes, ${dropped} excluded nodes marked failed.${NC}"
+    fi
+fi
+
+# Even without stall, OMF may have silently dropped nodes (batch < plan).
+# Mark the extras as failed so they don't linger in the plan.
+if [ "$stall_aborted" -eq 0 ]; then
+    omf_batch=$(cat "$tmpdir/nodes_total_omf" 2>/dev/null | tr -dc '0-9')
+    omf_batch=${omf_batch:-0}
+    if [ "$omf_batch" -ge 1 ] && [ "$omf_batch" -lt "${#node_keys[@]}" ] 2>/dev/null; then
+        dropped=0
+        for (( i=omf_batch; i<${#node_keys[@]}; i++ )); do
+            if ! is_node_failed "${node_keys[i]}"; then
+                mark_node_failed "${node_keys[i]}"
+                ((dropped++)) || true
+            fi
+        done
+        if [ "$dropped" -gt 0 ]; then
+            echo -e "  ${YELLOW}OMF batch was ${omf_batch}/${#node_keys[@]} — ${dropped} excluded nodes marked failed.${NC}"
+        fi
+        required_nodes=("${required_nodes[@]:0:$omf_batch}")
+        node_keys=("${node_keys[@]:0:$omf_batch}")
+        total_nodes=${#required_nodes[@]}
+    fi
+fi
 
 # Check for mixed disk error and handle it
 if grep -q "mixed disk names were found" "$omf_output_file" 2>/dev/null; then
@@ -345,6 +585,47 @@ if [ ${#successful_nodes[@]} -eq 0 ]; then
     exit 1
 fi
 
+# After a stall, OMF never printed "Giving up" for the stragglers so all batch
+# nodes passed the filter above. Ping-sweep to drop nodes that never PXE-booted.
+if [ "$stall_aborted" -eq 1 ] && [ ${#successful_nodes[@]} -gt 1 ]; then
+    echo -e "\n${CYAN}Pre-power-on ping sweep (filtering unreachable nodes)...${NC}"
+    pre_ok_nodes=()
+    pre_ok_keys=()
+    pre_pids=()
+    for i in "${!successful_nodes[@]}"; do
+        (
+            if ping -c 1 -W 3 "${successful_nodes[i]}" >/dev/null 2>&1; then
+                echo "ok" > "$tmpdir/pre_ping_$i"
+            else
+                echo "fail" > "$tmpdir/pre_ping_$i"
+            fi
+        ) &
+        pre_pids+=($!)
+    done
+    wait "${pre_pids[@]}" 2>/dev/null || true
+
+    for i in "${!successful_nodes[@]}"; do
+        status=$(cat "$tmpdir/pre_ping_$i" 2>/dev/null || echo "fail")
+        if [ "$status" = "ok" ]; then
+            pre_ok_nodes+=("${successful_nodes[i]}")
+            pre_ok_keys+=("${successful_keys[i]}")
+        else
+            echo -e "  ${RED}x${NC} ${successful_nodes[i]} — unreachable after imaging, skipping"
+            mark_node_failed "${successful_keys[i]}"
+        fi
+    done
+
+    pre_total=${#successful_nodes[@]}
+    if [ ${#pre_ok_nodes[@]} -gt 0 ]; then
+        successful_nodes=("${pre_ok_nodes[@]}")
+        successful_keys=("${pre_ok_keys[@]}")
+        echo -e "  ${GREEN}${#successful_nodes[@]}/${pre_total} nodes reachable after imaging${NC}"
+    else
+        echo -e "${RED}No nodes reachable after imaging. Nothing to power on.${NC}"
+        exit 1
+    fi
+fi
+
 node_list=$(IFS=,; echo "${successful_nodes[*]}")
 echo -e "\n${CYAN}Turning on ${#successful_nodes[@]} successfully imaged nodes...${NC}"
 omf tell -a on -t "$node_list" 2>&1 | grep -v "^/.*warning:" || true
@@ -356,6 +637,13 @@ timeout=300  # 5 minutes
 start_time=$(date +%s)
 final_ok=()
 final_fail=()
+
+# Stall detection for reachability:
+# If the number of responding nodes stops increasing for BOOT_STALL_TIMEOUT and
+# we're already above BOOT_MIN_PERCENT of the candidate set, stop early.
+verify_last_up_count=0
+verify_last_progress_time=$(date +%s)
+candidate_total=${#successful_nodes[@]}
 
 while true; do
     # Show elapsed time
@@ -389,11 +677,35 @@ while true; do
             all_up=false
         fi
     done
+
+    # Track progress changes for reachability stall detection
+    if [ "$up_count" -gt "$verify_last_up_count" ]; then
+        verify_last_up_count=$up_count
+        verify_last_progress_time=$current_time
+    fi
+
+    verify_stall_time=$((current_time - verify_last_progress_time))
+    if [ "$candidate_total" -gt 0 ] 2>/dev/null; then
+        verify_pct=$((up_count * 100 / candidate_total))
+    else
+        verify_pct=0
+    fi
+    if [ "$all_up" = "false" ] && [ "$candidate_total" -gt 0 ] 2>/dev/null; then
+        if [ "$verify_stall_time" -ge "${BOOT_STALL_TIMEOUT:-120}" ] 2>/dev/null && [ "$verify_pct" -ge "${BOOT_MIN_PERCENT:-50}" ] 2>/dev/null; then
+            echo -e "\n  ${YELLOW}Stall detected: ${up_count}/${candidate_total} nodes responding, no improvement for ${verify_stall_time}s — proceeding${NC}"
+            break
+        fi
+    fi
     
-    # Show progress on same line
-    printf "\r  [Elapsed: %d:%02d] %d/%d nodes responding\033[K" "$mins" "$secs" "$up_count" "${#successful_nodes[@]}"
+    # Show progress on same line, with stall countdown when no progress
+    if [ "$verify_stall_time" -ge 10 ] && [ "$up_count" -gt 0 ] && [ "$all_up" = "false" ]; then
+        printf "\r  [Elapsed: %d:%02d] %d/%d nodes responding ${RED}stall:%d/%ds${NC}${CLR}" \
+            "$mins" "$secs" "$up_count" "${#successful_nodes[@]}" "$verify_stall_time" "${BOOT_STALL_TIMEOUT:-120}"
+    else
+        printf "\r  [Elapsed: %d:%02d] %d/%d nodes responding${CLR}" "$mins" "$secs" "$up_count" "${#successful_nodes[@]}"
+    fi
     
-    if $all_up; then
+    if [ "$all_up" = "true" ]; then
         printf "\n"
         echo -e "  ${GREEN}All nodes responding${NC}"
         break

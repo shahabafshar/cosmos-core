@@ -110,6 +110,8 @@ Edit `scripts/config.sh`:
 - **PLAN_FILE** — File that stores your node selection, per-site (e.g., `.cosmos_plan.outdoor`, gitignored). Created via menu option 1.
 - **PACKAGES** — Space-separated list of packages to install on each node (default: `iperf3 tmux`).
 - **SETUP_EXTRA_COMMANDS** — Optional array of commands to run on each node after package install.
+- **IMAGING_TIMEOUT** / **SETUP_TIMEOUT** — See `scripts/config.sh` (imaging uses OMF-scale defaults; adjust if your batch is slow).
+- **SSH_USER** — SSH login for node commands (default `root`). Set in `config.sh` or the environment if your ORBIT key is for another user.
 
 ## Requirements
 

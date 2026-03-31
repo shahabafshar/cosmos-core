@@ -17,8 +17,10 @@
 #
 # LOG_DIR         — Directory for logs.
 #
-# IMAGING_TIMEOUT — Timeout for omf load (imaging). Default 720s (12 min).
-# SETUP_TIMEOUT   — Timeout for setup operations. Default 300s (5 min).
+# IMAGING_TIMEOUT    — Max time for omf load (imaging). Default 800s (~13 min).
+# BOOT_STALL_TIMEOUT — If no new nodes come online for this many seconds, stop early. Default 120s.
+# BOOT_MIN_PERCENT   — Minimum % of nodes online before stall detection kicks in. Default 50%.
+# SETUP_TIMEOUT      — Timeout for setup operations. Default 300s (5 min).
 #
 # ======================================
 
@@ -30,8 +32,9 @@ LOG_DIR="$COSMOS_ROOT/logs"
 # PLAN_FILE, NODES_CACHE, FAILED_NODES_FILE are per-site
 
 # Timeouts (seconds)
-# Keep imaging timeout aligned with OMF behavior; too low causes partial imaging and SSH auth issues later.
-IMAGING_TIMEOUT=800      # ~13m20s (OMF default)
+IMAGING_TIMEOUT=800      # ~13m20s for full omf load (OMF default)
+BOOT_STALL_TIMEOUT=120   # If no new nodes come online for this long, stop waiting and continue
+BOOT_MIN_PERCENT=50      # Minimum % of nodes that must be online before stall timeout applies
 SETUP_TIMEOUT=300        # 5 minutes for setup per-node operations
 
 # Source lib.sh for discovery functions (if not already sourced)
