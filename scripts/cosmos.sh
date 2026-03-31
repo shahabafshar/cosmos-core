@@ -199,8 +199,14 @@ configure_node_plan() {
     [ "$page_rows" -lt 3 ] && page_rows=3
 
     # Function to draw the grid
+    local prev_page_offset=-1
     draw_grid() {
-        clear
+        if [ "$prev_page_offset" -eq -1 ] || [ "$page_offset" -ne "$prev_page_offset" ]; then
+            clear
+        else
+            tput cup 0 0
+        fi
+        prev_page_offset=$page_offset
         echo -e "$COSMOS_BANNER"
         echo -e "     ${YELLOW}Select nodes — choose which nodes to work with${NC}"
         local method_label
@@ -279,6 +285,7 @@ configure_node_plan() {
             fi
             printf '%*s' "$pad" ''
             if [ $(( (i + 1) % cols )) -eq 0 ] || [ $((i + 1)) -eq "$total" ]; then
+                tput el 2>/dev/null || true
                 echo
             fi
         done
@@ -288,6 +295,8 @@ configure_node_plan() {
         echo -e "\n     ${PURPLE}Arrows${NC} move   ${PURPLE}Space${NC} select/deselect   ${PURPLE}a${NC} All   ${PURPLE}n${NC} None   ${PURPLE}t${NC} Toggle all"
         echo -e "     ${PURPLE}s${NC} Save   ${PURPLE}q${NC} Quit   ${PURPLE}r${NC} Refresh (clears failed)   ${PURPLE}Numbers+Enter${NC} multi-select"
         echo -e "     ${PURPLE}PgUp/PgDn${NC} page   ${PURPLE}Home/End${NC} jump"
+        # Clear any leftover lines below (from previous longer page)
+        tput ed 2>/dev/null || true
     }
 
     while true; do
