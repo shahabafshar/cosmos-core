@@ -16,107 +16,90 @@
               ✦    ·    .         *         .    ·    ✦    .    *
 ```
 
-**Created by:** Shahab Afshar  
-**Course:** Wireless Network Security  
-**Professor:** Dr. Mohamed Selim  
+A quick-start tool for the [ORBIT/COSMOS wireless testbed](https://www.orbit-lab.org/). It gets your nodes imaged, powered on, and ready so you can jump straight into your experiment.
 
----
+## How it works
 
-Bootstrap layer for the [ORBIT testbed](https://www.orbit-lab.org/). Cosmos Core handles **initialization** and **basic node setup** so you can run your own experiments on a ready grid.
+1. You reserve a testbed slot and SSH into the console
+2. Run Cosmos Core — it detects your site and discovers available nodes
+3. Pick which nodes you want, hit Init — it images them, powers them on, verifies they're reachable
+4. Optionally run Setup to install packages (iperf3, tmux, etc.)
+5. SSH into your nodes and run your experiment
 
-## What it does
+## Getting started
 
-- **Init** — Powers off the grid, resets the attenuation matrix, loads the node image, powers on your nodes, and waits until they are reachable.
-- **Setup** — On every node: cleanup (kill stale processes, reset interface), install a configurable set of basic packages (e.g. `iperf3`, `tmux`), and optionally run extra commands you define.
-
-No test suites or role-specific daemons (AP/client/jammer) are included; you build those on top.
-
-## Quick start
+On your testbed console (e.g. `ssh you@sb4.orbit-lab.org`):
 
 ```bash
+git clone https://github.com/shahabafshar/cosmos-core.git
+cd cosmos-core
+chmod +x *.sh scripts/*.sh
 ./main.sh
 ```
 
-All scripts except the entry point live in `scripts/`. The menu offers:
+The interactive menu walks you through everything:
 
-1. **Select nodes** — Choose which nodes to work with. Arrows + space, or type numbers + Enter.
-2. **Initialize selected nodes** — Load image, power on selected nodes.
-3. **Setup selected nodes** — Cleanup + install packages on selected nodes.
-4. **Check selected nodes** — Ping selected nodes (parallel).
-5. **Power off selected nodes** — Shut down selected nodes.
-6. **About** — Credits and short description.
-7. **Exit**
+| Option              | What it does                                                  |
+| ------------------- | ------------------------------------------------------------- |
+| **1. Select nodes** | Pick which nodes to use (arrow keys + space, or type numbers) |
+| **2. Initialize**   | Power off → image nodes → power on → verify reachable         |
+| **3. Setup**        | Kill stale processes, reset interfaces, install packages      |
+| **4. Check**        | Ping all selected nodes                                      |
+| **5. Power off**    | Shut down selected nodes                                     |
 
-> **Note:** Options 2-5 are disabled until you select nodes first (option 1). Your node selection is saved per-site (e.g., `.cosmos_plan.outdoor`).
-
-Manual usage (from repo root):
+After Init + Setup, your nodes are ready. SSH in and do your thing:
 
 ```bash
-./main.sh                              # Start menu
-bash scripts/init.sh                   # Initialize ORBIT testbed (selected nodes)
-bash scripts/setup.sh                  # Setup selected nodes (cleanup + packages)
+ssh root@node1-1
 ```
 
-## Node discovery
+## Supported testbeds
 
-On startup, Cosmos automatically detects the ORBIT site (outdoor, sb1, etc.) and discovers nodes:
+Cosmos Core auto-detects the site from the console hostname. Tested on:
 
-1. **OMF query** (primary) — Uses `omf stat -t all` to list available nodes.
-2. **ARP table** (fallback) — Parses `arp -a` if OMF fails (shows warning: may be incomplete).
-3. **Hardcoded** (fallback) — Uses the node list in `config.sh` if both methods fail.
+| Testbed              | Domain                 | Notes                                    |
+| -------------------- | ---------------------- | ---------------------------------------- |
+| **grid**             | grid.orbit-lab.org     | 186 nodes, many with Atheros WiFi        |
+| **outdoor**          | outdoor.orbit-lab.org  | Outdoor deployment                       |
+| **sb4**              | sb4.orbit-lab.org      | 9-node sandbox with RF attenuator matrix |
+| **sb1–sb3**          | sb1–sb3.orbit-lab.org  | Small sandboxes (2 nodes each)           |
+| **COSMOS sandboxes** | *.cosmos-lab.org       | bed, weeks, sb1, sb2                     |
 
-Discovered nodes are cached per-site (e.g., `.cosmos_nodes.outdoor`, `.cosmos_nodes.sb4`). This allows seamless switching between ORBIT consoles with shared home directories. Press `r` inside **Select nodes** to re-discover and update the cache.
+Node discovery, caching, and file paths are all per-site — you can switch between testbeds without conflicts.
 
-## Failure handling
+## What it handles for you
 
-Cosmos tracks nodes that fail during operations:
-
-- **Pre-check** — Before initializing, unreachable nodes are detected via ping and can be skipped.
-- **During operations** — Nodes that fail during imaging, setup, or boot are automatically marked as failed.
-- **Visual indicator** — Failed nodes show as `[!]` in red in the node selection screen and cannot be selected.
-- **Auto-skip** — Subsequent operations automatically skip failed nodes.
-- **Clear failures** — Press `r` (refresh) in the node selection screen to clear the failed list and retry.
-
-Failed nodes are tracked in `.cosmos_failed` (auto-generated, gitignored).
-
-## Logging
-
-A single session log is created when Cosmos starts, capturing all operations:
-
-```
-logs/session_safshar_2026-02-03_16-30-45.log
-```
-
-The log includes:
-- Session header (user, date, host, site)
-- All operations with timestamps (INITIALIZE, SETUP, CHECK)
-- Full output with ANSI colors stripped
-
-## Parallel execution
-
-Setup runs in parallel for faster operation:
-1. **Reachability check** — All nodes pinged simultaneously
-2. **Package installation** — All reachable nodes setup at once
-
-This significantly reduces setup time when working with many nodes.
+- **Node discovery** — auto-discovers nodes via OMF (falls back to ARP, then hardcoded list)
+- **Imaging** — loads `wifi-experiment.ndz` via `omf load` with progress tracking
+- **Attenuation matrix** — resets the JFW RF matrix on sb4 (skipped on other testbeds)
+- **Failure tracking** — nodes that fail during imaging or boot are marked `[!]` and auto-skipped; press `r` to clear and retry
+- **Logging** — full session logs under `logs/` with timestamps
 
 ## Configuration
 
-Edit `scripts/config.sh`:
+Edit `scripts/config.sh` if you need to change defaults:
 
-- **NODE_DOMAIN** — Auto-detected or set manually (e.g. `outdoor.orbit-lab.org`).
-- **NODE_NAMES** — Auto-discovered or hardcoded fallback list of short node names.
-- **DEFAULT_INTERFACE** — Interface to reset during Setup (e.g. `wlan0`).
-- **PLAN_FILE** — File that stores your node selection, per-site (e.g., `.cosmos_plan.outdoor`, gitignored). Created via menu option 1.
-- **PACKAGES** — Space-separated list of packages to install on each node (default: `iperf3 tmux`).
-- **SETUP_EXTRA_COMMANDS** — Optional array of commands to run on each node after package install.
-- **IMAGING_TIMEOUT** / **SETUP_TIMEOUT** — See `scripts/config.sh` (imaging uses OMF-scale defaults; adjust if your batch is slow).
-- **SSH_USER** — SSH login for node commands (default `root`). Set in `config.sh` or the environment if your ORBIT key is for another user.
+| Setting             | Default        | Description                                          |
+| ------------------- | -------------- | ---------------------------------------------------- |
+| `PACKAGES`          | `iperf3 tmux`  | Packages installed on each node during Setup         |
+| `DEFAULT_INTERFACE` | `wlan0`        | Interface reset during Setup                         |
+| `IMAGING_TIMEOUT`   | `800` (seconds)| Max time for `omf load`                              |
+| `STALL_DETECTION`   | `0`            | Set to `1` to enable early abort when imaging stalls |
+| `SSH_USER`          | `root`         | SSH user for node operations                         |
+
+Most settings are auto-detected. You usually don't need to change anything.
 
 ## Requirements
 
-- ORBIT testbed access
-- On your machine: `ssh`, `omf`, `wget`
+- A [COSMOS/ORBIT](https://www.cosmos-lab.org/) account with a testbed reservation
+- Run on the testbed console (not your local machine)
+
+## Credits
+
+**Created by:** Shahab Afshar
+**Course:** Wireless Network Security (CprE 5370)
+**Professor:** Dr. Mohamed Selim
+**Institution:** Iowa State University
 
 ## Disclaimer
 
