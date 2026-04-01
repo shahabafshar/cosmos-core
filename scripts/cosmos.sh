@@ -198,6 +198,29 @@ configure_node_plan() {
     local page_rows=$(( term_h - header_lines ))
     [ "$page_rows" -lt 3 ] && page_rows=3
 
+    # grid_start_row: screen row where the node grid begins (set by draw_grid)
+    local grid_start_row=0
+
+    # Swap the > marker between two grid indices (no full redraw).
+    # Only call when both indices are on the currently visible page.
+    move_marker() {
+        local old=$1 new=$2
+        local old_vis=$((old - page_offset * cols))
+        local new_vis=$((new - page_offset * cols))
+        local old_row=$((grid_start_row + old_vis / cols))
+        local old_col=$(( (old_vis % cols) * (cell_w + 4) ))
+        local new_row=$((grid_start_row + new_vis / cols))
+        local new_col=$(( (new_vis % cols) * (cell_w + 4) ))
+        # Erase old marker
+        tput cup "$old_row" "$old_col"
+        echo -n " "
+        # Draw new marker
+        tput cup "$new_row" "$new_col"
+        echo -ne "${YELLOW}>${NC}"
+        # Park terminal cursor out of the way
+        tput cup "$((grid_start_row + page_rows + 5))" 0
+    }
+
     # Function to draw the grid
     draw_grid() {
         clear
@@ -243,6 +266,15 @@ configure_node_plan() {
         local start_idx=$((page_offset * cols))
         local end_idx=$(( (page_offset + page_rows) * cols ))
         [ "$end_idx" -gt "$total" ] && end_idx=$total
+
+        # Calculate grid start row: banner lines + header lines + page indicator
+        local total_rows=$(( (total + cols - 1) / cols ))  # redeclare for scope
+        local banner_lines
+        banner_lines=$(echo -e "$COSMOS_BANNER" | wc -l)
+        grid_start_row=$((banner_lines + 4))  # banner + title + site + summary+blank
+        if [ "$total_rows" -gt "$page_rows" ]; then
+            ((grid_start_row += 1)) || true
+        fi
 
         local i idx idx_pad hostname short_name plain len pad k marker
         for (( i=start_idx; i<end_idx; i++ )); do
@@ -293,8 +325,15 @@ configure_node_plan() {
         fi
     }
 
+    local needs_full=1  # first iteration always does full draw
+    local prev_cursor=0
+
     while true; do
-        draw_grid
+        if [ "$needs_full" -eq 1 ]; then
+            draw_grid
+            needs_full=0
+        fi
+        prev_cursor=$cursor
         read_key
         local key="$REPLY"
         local items_per_page=$((page_rows * cols))
@@ -314,16 +353,20 @@ configure_node_plan() {
             $'\x1b[5~') # PgUp
                 cursor=$((cursor - items_per_page))
                 [ "$cursor" -lt 0 ] && cursor=0
+                needs_full=1
                 ;;
             $'\x1b[6~') # PgDn
                 cursor=$((cursor + items_per_page))
                 [ "$cursor" -ge "$total" ] && cursor=$((total - 1))
+                needs_full=1
                 ;;
             $'\x1b[H'|$'\x1b[1~') # Home
                 cursor=0
+                needs_full=1
                 ;;
             $'\x1b[F'|$'\x1b[4~') # End
                 cursor=$((total - 1))
+                needs_full=1
                 ;;
             ' ') # Space - select/deselect current node
                 k="${all_keys[cursor]}"
@@ -335,15 +378,18 @@ configure_node_plan() {
                     # Mark for unfail if it was failed (applied on save)
                     is_node_failed "$k" 2>/dev/null && unfail[$k]=1
                 fi
+                needs_full=1
                 ;;
             a|A) # Select all (marks failed for unfail on save)
                 for k in "${all_keys[@]}"; do
                     enabled[$k]=1
                     is_node_failed "$k" 2>/dev/null && unfail[$k]=1
                 done
+                needs_full=1
                 ;;
             n|N) # Select none (also clears unfail marks)
                 for k in "${all_keys[@]}"; do enabled[$k]=0; unfail[$k]=0; done
+                needs_full=1
                 ;;
             t|T) # Toggle all
                 for k in "${all_keys[@]}"; do
@@ -355,6 +401,7 @@ configure_node_plan() {
                         is_node_failed "$k" 2>/dev/null && unfail[$k]=1
                     fi
                 done
+                needs_full=1
                 ;;
             s|S) # Save
                 if [ -n "${PLAN_FILE:-}" ]; then
@@ -446,8 +493,24 @@ configure_node_plan() {
                         cursor=$((num - 1))  # Move cursor to last toggled
                     fi
                 done
+                needs_full=1
                 ;;
         esac
+
+        # Arrow moves on the same page: just swap the > marker
+        if [ "$needs_full" -eq 0 ] && [ "$cursor" -ne "$prev_cursor" ]; then
+            # Check both are on the current visible page
+            local old_vis=$((prev_cursor - page_offset * cols))
+            local new_vis=$((cursor - page_offset * cols))
+            local vis_count=$((page_rows * cols))
+            if [ "$old_vis" -ge 0 ] && [ "$old_vis" -lt "$vis_count" ] \
+               && [ "$new_vis" -ge 0 ] && [ "$new_vis" -lt "$vis_count" ]; then
+                move_marker "$prev_cursor" "$cursor"
+            else
+                # Crossed page boundary — full redraw
+                needs_full=1
+            fi
+        fi
     done
 }
 
