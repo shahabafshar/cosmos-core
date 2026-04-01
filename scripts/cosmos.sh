@@ -201,6 +201,51 @@ configure_node_plan() {
     # grid_start_row: screen row where the node grid begins (set by draw_grid)
     local grid_start_row=0
 
+    # Repaint a single cell in-place + update the summary header line.
+    # Used for Space toggle — avoids full redraw.
+    repaint_cell() {
+        local i=$1
+        local vis=$((i - page_offset * cols))
+        local cell_total=$((4 + cell_w))
+        local row=$((grid_start_row + vis / cols))
+        local col=$(( (vis % cols) * cell_total ))
+        local k="${all_keys[i]}"
+        local idx=$((i + 1))
+        local idx_pad hostname short_name marker plain len pad
+        if [ "$total" -ge 100 ]; then idx_pad=$(printf "%3d" "$idx"); else idx_pad=$(printf "%2d" "$idx"); fi
+        IFS='|' read -r hostname _ <<< "${NODES[$k]}"
+        short_name="${hostname%%.*}"
+        if [ "$i" -eq "$cursor" ]; then marker="${YELLOW}>${NC}"; else marker=" "; fi
+        plain="${idx_pad}. [x] ${short_name}"
+        len=${#plain}
+        pad=$((cell_w - len - 1))
+        [ "$pad" -lt 0 ] && pad=0
+
+        tput cup "$row" "$col"
+        if is_node_failed "$k" 2>/dev/null && [ "${unfail[$k]}" -ne 1 ] 2>/dev/null; then
+            echo -ne "    ${marker}${RED}${idx_pad}. [!] ${short_name}${NC}"
+        elif [ "${enabled[$k]}" -eq 1 ] 2>/dev/null; then
+            echo -ne "    ${marker}${CYAN}${idx_pad}.${NC} [${GREEN}x${NC}] ${short_name}"
+        else
+            echo -ne "    ${marker}${CYAN}${idx_pad}.${NC} [${RED} ${NC}] ${short_name}"
+        fi
+        printf '%*s' "$pad" ''
+
+        # Update summary header line (row 14+2 = banner + title + site, then summary is next)
+        local sel_count=0 failed_count=0
+        for k in "${all_keys[@]}"; do
+            [ "${enabled[$k]}" -eq 1 ] 2>/dev/null && ((sel_count++)) || true
+            is_node_failed "$k" 2>/dev/null && [ "${unfail[$k]}" -ne 1 ] 2>/dev/null && ((failed_count++)) || true
+        done
+        tput cup 16 0  # summary line: banner(14) + title(1) + site(1) = row 16
+        echo -ne "     ${GREEN}${sel_count} selected${NC} / ${total} total"
+        [ "$failed_count" -gt 0 ] && echo -ne "  ${RED}${failed_count} failed${NC}"
+        tput el  # clear rest of line
+
+        # Park cursor
+        tput cup "$((grid_start_row + page_rows + 5))" 0
+    }
+
     # Swap the > marker between two grid indices (no full redraw).
     # Only call when both indices are on the currently visible page.
     move_marker() {
@@ -380,7 +425,7 @@ configure_node_plan() {
                     # Mark for unfail if it was failed (applied on save)
                     is_node_failed "$k" 2>/dev/null && unfail[$k]=1
                 fi
-                needs_full=1
+                repaint_cell "$cursor"
                 ;;
             a|A) # Select all (marks failed for unfail on save)
                 for k in "${all_keys[@]}"; do
