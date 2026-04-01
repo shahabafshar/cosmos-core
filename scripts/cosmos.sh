@@ -326,8 +326,33 @@ configure_node_plan() {
             tput el
         done
 
-        # Park cursor
-        cup "$((grid_start_row + page_rows + 5))" 0
+        # Repaint footer
+        local footer_row=$((grid_start_row + visible_rows))
+        if [ "$failed_count" -gt 0 ]; then
+            cup "$((footer_row))" 0
+            tput el
+            cup "$((footer_row + 1))" 0
+            echo -ne "     ${RED}[!] = failed (${failed_count}) — select to retry, or r to clear all${NC}"
+            tput el
+            ((footer_row += 2)) || true
+        else
+            cup "$((footer_row))" 0
+            tput el
+            ((footer_row += 1)) || true
+        fi
+        cup "$((footer_row))" 0
+        tput el
+        cup "$((footer_row + 1))" 0
+        echo -ne "     ${PURPLE}Arrows${NC} move   ${PURPLE}Space${NC} select/deselect   ${PURPLE}a${NC} All   ${PURPLE}n${NC} None   ${PURPLE}t${NC} Toggle all"
+        tput el
+        cup "$((footer_row + 2))" 0
+        echo -ne "     ${PURPLE}s${NC} Save   ${PURPLE}q${NC} Quit   ${PURPLE}r${NC} Refresh (clears failed)   ${PURPLE}Numbers+Enter${NC} multi-select"
+        tput el
+        cup "$((footer_row + 3))" 0
+        echo -ne "     ${PURPLE}PgUp/PgDn${NC} page   ${PURPLE}Home/End${NC} jump"
+        tput el
+        cup "$((footer_row + 4))" 0
+        tput ed 2>/dev/null || true
     }
 
     # Swap the > marker between two grid indices (no full redraw).
