@@ -633,9 +633,8 @@ configure_node_plan() {
                 ;;
         esac
 
-        # Arrow moves on the same page: just swap the > marker
+        # Arrow moves: swap marker if same page, repaint if page crossed
         if [ "$needs_full" -eq 0 ] && [ "$cursor" -ne "$prev_cursor" ]; then
-            # Check both are on the current visible page
             local old_vis=$((prev_cursor - page_offset * cols))
             local new_vis=$((cursor - page_offset * cols))
             local vis_count=$((page_rows * cols))
@@ -643,8 +642,14 @@ configure_node_plan() {
                && [ "$new_vis" -ge 0 ] && [ "$new_vis" -lt "$vis_count" ]; then
                 move_marker "$prev_cursor" "$cursor"
             else
-                # Crossed page boundary — full redraw
-                needs_full=1
+                # Crossed page boundary — scroll page and repaint in-place
+                local cr=$((cursor / cols))
+                if [ "$cr" -lt "$page_offset" ]; then
+                    page_offset=$cr
+                elif [ "$cr" -ge $((page_offset + page_rows)) ]; then
+                    page_offset=$((cr - page_rows + 1))
+                fi
+                repaint_page
             fi
         fi
     done
