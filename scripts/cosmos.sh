@@ -359,9 +359,6 @@ configure_node_plan() {
     read_key() {
         local c
         REPLY=""
-        # Flush any pending input (leaked escape bytes from fast key presses)
-        while IFS= read -rsn1 -t 0.001 c 2>/dev/null; do :; done
-        # Read the actual key
         IFS= read -rsn1 c
         if [[ "$c" == $'\x1b' ]]; then
             local seq=""
@@ -377,6 +374,12 @@ configure_node_plan() {
 
     local needs_full=1  # first iteration always does full draw
     local prev_cursor=0
+
+    # Suppress terminal echo for the entire selection loop.
+    # This prevents escape sequences from printing to screen during repaints.
+    local old_stty
+    old_stty=$(stty -g)
+    stty -echo
 
     while true; do
         if [ "$needs_full" -eq 1 ]; then
@@ -464,9 +467,11 @@ configure_node_plan() {
                     echo -e "\n${GREEN}Plan saved${NC}"
                     sleep 0.5
                 fi
+                stty "$old_stty"
                 return 0
                 ;;
             q|Q) # Quit without saving
+                stty "$old_stty"
                 return 0
                 ;;
             r|R) # Refresh - delete cache, clear failed, re-discover
