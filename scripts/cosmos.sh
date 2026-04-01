@@ -359,10 +359,13 @@ configure_node_plan() {
     read_key() {
         local c
         REPLY=""
+        # Flush any pending input (leaked escape bytes from fast key presses)
+        while IFS= read -rsn1 -t 0.001 c 2>/dev/null; do :; done
+        # Read the actual key
         IFS= read -rsn1 c
         if [[ "$c" == $'\x1b' ]]; then
             local seq=""
-            while IFS= read -rsn1 -t 0.02 c; do
+            while IFS= read -rsn1 -t 0.05 c; do
                 seq+="$c"
                 [[ "$c" =~ [A-Za-z~] ]] && break
             done
