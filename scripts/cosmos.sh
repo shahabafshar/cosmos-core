@@ -193,8 +193,8 @@ configure_node_plan() {
     # Paging: compute visible rows from terminal height
     local term_h page_offset=0
     term_h=$(tput lines 2>/dev/null || echo 24)
-    # Reserve lines for: banner(14) + title(1) + site(1) + summary+blank(2) + page?(1) + blank(1) + footer(6) = ~26
-    local header_lines=26
+    # Reserve lines for non-grid content (header + footer)
+    local header_lines=12
     local page_rows=$(( term_h - header_lines ))
     [ "$page_rows" -lt 3 ] && page_rows=3
 
@@ -203,8 +203,8 @@ configure_node_plan() {
     local summary_row=0
     local page_ind_row=-1  # -1 means no page indicator
 
-    # Helper: position cursor at row, col
-    cup() { tput cup "$1" "$2"; }
+    # Helper: position cursor at row, col (adjusted for terminal offset)
+    cup() { tput cup "$(($1 + 1))" "$2"; }
 
     # Repaint a single cell in-place + update the summary header line.
     # Used for Space toggle — avoids full redraw.
