@@ -375,11 +375,11 @@ configure_node_plan() {
     local needs_full=1  # first iteration always does full draw
     local prev_cursor=0
 
-    # Suppress terminal echo for the entire selection loop.
-    # This prevents escape sequences from printing to screen during repaints.
+    # Suppress terminal echo and hide cursor for the entire selection loop.
     local old_stty
     old_stty=$(stty -g)
     stty -echo
+    tput civis 2>/dev/null || true
 
     while true; do
         if [ "$needs_full" -eq 1 ]; then
@@ -467,10 +467,12 @@ configure_node_plan() {
                     echo -e "\n${GREEN}Plan saved${NC}"
                     sleep 0.5
                 fi
+                tput cnorm 2>/dev/null || true
                 stty "$old_stty"
                 return 0
                 ;;
             q|Q) # Quit without saving
+                tput cnorm 2>/dev/null || true
                 stty "$old_stty"
                 return 0
                 ;;
