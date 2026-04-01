@@ -118,6 +118,10 @@ Edit `scripts/config.sh`:
 - ORBIT testbed access
 - On your machine: `ssh`, `omf`, `wget`
 
+## Disclaimer
+
+This is an independent, community-created tool and is **not affiliated with, endorsed by, or supported by** the COSMOS/ORBIT testbed, Rutgers University, WINLAB, or the NSF. COSMOS and ORBIT are trademarks of their respective owners. Use this tool at your own risk and in accordance with the testbed's acceptable use policies.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
