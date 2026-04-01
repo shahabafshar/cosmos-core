@@ -198,15 +198,49 @@ configure_node_plan() {
     local page_rows=$(( term_h - header_lines ))
     [ "$page_rows" -lt 3 ] && page_rows=3
 
-    # Function to draw the grid
-    local prev_page_offset=-1
-    draw_grid() {
-        if [ "$prev_page_offset" -eq -1 ] || [ "$page_offset" -ne "$prev_page_offset" ]; then
-            clear
+    # Number of header lines before the grid starts (banner + info + summary + page indicator).
+    # This is used to map grid index -> screen row for targeted cell redraws.
+    local grid_start_row=0
+
+    # Render a single cell at grid index $1 to a string (no newline).
+    render_cell() {
+        local i=$1 k idx idx_pad hostname short_name plain len pad marker
+        k="${all_keys[i]}"
+        idx=$((i + 1))
+        if [ "$total" -ge 100 ]; then idx_pad=$(printf "%3d" "$idx"); else idx_pad=$(printf "%2d" "$idx"); fi
+        IFS='|' read -r hostname _ <<< "${NODES[$k]}"
+        short_name="${hostname%%.*}"
+        if [ "$i" -eq "$cursor" ]; then marker="${YELLOW}>${NC}"; else marker=" "; fi
+        plain="${idx_pad}. [x] ${short_name}"
+        len=${#plain}
+        pad=$((cell_w - len - 1))
+        [ "$pad" -lt 0 ] && pad=0
+        if is_node_failed "$k" 2>/dev/null && [ "${unfail[$k]}" -ne 1 ] 2>/dev/null; then
+            echo -ne "    ${marker}${RED}${idx_pad}. [!] ${short_name}${NC}"
+        elif [ "${enabled[$k]}" -eq 1 ] 2>/dev/null; then
+            echo -ne "    ${marker}${CYAN}${idx_pad}.${NC} [${GREEN}x${NC}] ${short_name}"
         else
-            tput cup 0 0
+            echo -ne "    ${marker}${CYAN}${idx_pad}.${NC} [${RED} ${NC}] ${short_name}"
         fi
-        prev_page_offset=$page_offset
+        printf '%*s' "$pad" ''
+    }
+
+    # Redraw just one cell in-place (move cursor to its screen position, render, return).
+    redraw_cell() {
+        local i=$1
+        # Cell's screen row/col relative to grid start
+        local grid_idx=$((i - page_offset * cols))
+        [ "$grid_idx" -lt 0 ] && return
+        local row=$((grid_start_row + grid_idx / cols))
+        local col=$(( (grid_idx % cols) * (cell_w + 4) ))
+        tput cup "$row" "$col"
+        render_cell "$i"
+    }
+
+    # Full screen redraw
+    draw_grid() {
+        tput civis 2>/dev/null || true   # hide cursor during redraw
+        clear
         echo -e "$COSMOS_BANNER"
         echo -e "     ${YELLOW}Select nodes — choose which nodes to work with${NC}"
         local method_label
@@ -238,52 +272,34 @@ configure_node_plan() {
             page_offset=$((cursor_row - page_rows + 1))
         fi
 
-        local start_idx=$((page_offset * cols))
-        local end_idx=$(( (page_offset + page_rows) * cols ))
-        [ "$end_idx" -gt "$total" ] && end_idx=$total
-
         # Page indicator
         if [ "$total_rows" -gt "$page_rows" ]; then
             local cur_page=$((page_offset / page_rows + 1))
             local total_pages=$(( (total_rows + page_rows - 1) / page_rows ))
-            echo -e "     ${CYAN}Page ${cur_page}/${total_pages}${NC} (${PURPLE}PgUp/PgDn${NC} to scroll)\n"
+            echo -e "     ${CYAN}Page ${cur_page}/${total_pages}${NC} (${PURPLE}PgUp/PgDn${NC} to scroll)"
+        fi
+        echo ""
+
+        # Record where the grid starts (current terminal row)
+        # Count printed lines: banner(~3) + title(1) + site(1) + summary(1) + blank(1) + page?(1) + blank(1)
+        grid_start_row=$(tput lines 2>/dev/null || echo 24)
+        # Actually measure by checking cursor position — simpler: count what we printed.
+        # Banner is multi-line; safest to just query cursor pos or count fixed lines.
+        # Use a fixed estimate based on what we know:
+        local banner_lines
+        banner_lines=$(echo -e "$COSMOS_BANNER" | wc -l)
+        grid_start_row=$((banner_lines + 4))  # banner + title + site + summary + blank
+        if [ "$total_rows" -gt "$page_rows" ]; then
+            ((grid_start_row += 1)) || true  # page indicator line
         fi
 
-        local i idx idx_pad hostname short_name plain len pad k marker
+        local start_idx=$((page_offset * cols))
+        local end_idx=$(( (page_offset + page_rows) * cols ))
+        [ "$end_idx" -gt "$total" ] && end_idx=$total
+
+        local i
         for (( i=start_idx; i<end_idx; i++ )); do
-            k="${all_keys[i]}"
-            idx=$((i + 1))
-            # Pad index to width of largest index number
-            if [ "$total" -ge 100 ]; then
-                idx_pad=$(printf "%3d" "$idx")
-            else
-                idx_pad=$(printf "%2d" "$idx")
-            fi
-            IFS='|' read -r hostname _ <<< "${NODES[$k]}"
-            short_name="${hostname%%.*}"
-            # Cursor marker
-            if [ "$i" -eq "$cursor" ]; then marker="${YELLOW}>${NC}"; else marker=" "; fi
-            # Check if node is failed (and not marked for unfail)
-            if is_node_failed "$k" 2>/dev/null && [ "${unfail[$k]}" -ne 1 ] 2>/dev/null; then
-                plain="${idx_pad}. [!] ${short_name}"
-                len=${#plain}
-                pad=$((cell_w - len - 1))
-                [ "$pad" -lt 0 ] && pad=0
-                echo -ne "    ${marker}${RED}${idx_pad}. [!] ${short_name}${NC}"
-            elif [ "${enabled[$k]}" -eq 1 ] 2>/dev/null; then
-                plain="${idx_pad}. [x] ${short_name}"
-                len=${#plain}
-                pad=$((cell_w - len - 1))
-                [ "$pad" -lt 0 ] && pad=0
-                echo -ne "    ${marker}${CYAN}${idx_pad}.${NC} [${GREEN}x${NC}] ${short_name}"
-            else
-                plain="${idx_pad}. [ ] ${short_name}"
-                len=${#plain}
-                pad=$((cell_w - len - 1))
-                [ "$pad" -lt 0 ] && pad=0
-                echo -ne "    ${marker}${CYAN}${idx_pad}.${NC} [${RED} ${NC}] ${short_name}"
-            fi
-            printf '%*s' "$pad" ''
+            render_cell "$i"
             if [ $(( (i + 1) % cols )) -eq 0 ] || [ $((i + 1)) -eq "$total" ]; then
                 tput el 2>/dev/null || true
                 echo
@@ -295,29 +311,36 @@ configure_node_plan() {
         echo -e "\n     ${PURPLE}Arrows${NC} move   ${PURPLE}Space${NC} select/deselect   ${PURPLE}a${NC} All   ${PURPLE}n${NC} None   ${PURPLE}t${NC} Toggle all"
         echo -e "     ${PURPLE}s${NC} Save   ${PURPLE}q${NC} Quit   ${PURPLE}r${NC} Refresh (clears failed)   ${PURPLE}Numbers+Enter${NC} multi-select"
         echo -e "     ${PURPLE}PgUp/PgDn${NC} page   ${PURPLE}Home/End${NC} jump"
-        # Clear any leftover lines below (from previous longer page)
         tput ed 2>/dev/null || true
+        tput cnorm 2>/dev/null || true  # restore cursor
+    }
+
+    # Read a single keypress, properly consuming escape sequences.
+    read_key() {
+        local c
+        REPLY=""
+        IFS= read -rsn1 c
+        if [[ "$c" == $'\x1b' ]]; then
+            # Drain the full escape sequence
+            local seq=""
+            while IFS= read -rsn1 -t 0.02 c; do
+                seq+="$c"
+                # Stop at a letter (arrows/Home/End) or ~ (PgUp/PgDn/etc)
+                [[ "$c" =~ [A-Za-z~] ]] && break
+            done
+            REPLY=$'\x1b'"${seq}"
+        else
+            REPLY="$c"
+        fi
     }
 
     while true; do
         draw_grid
-        # Read single key (handle escape sequences for arrows, PgUp/Dn, Home/End)
-        IFS= read -rsn1 key
-        if [[ "$key" == $'\x1b' ]]; then
-            read -rsn1 -t 0.01 seq1
-            if [[ "$seq1" == "[" ]]; then
-                read -rsn1 -t 0.01 seq2
-                # Extended sequences end with ~ (e.g. 5~ = PgUp, 6~ = PgDn, 1~ = Home, 4~ = End)
-                if [[ "$seq2" =~ [0-9] ]]; then
-                    read -rsn1 -t 0.01 seq3
-                    key=$'\x1b'"[${seq2}${seq3}"
-                else
-                    key=$'\x1b'"[${seq2}"
-                fi
-            else
-                key=$'\x1b'"${seq1}"
-            fi
-        fi
+        # Read key
+        read_key
+        local key="$REPLY"
+        local prev_cursor=$cursor
+        local needs_full_redraw=0
         local items_per_page=$((page_rows * cols))
         case "$key" in
             $'\x1b[A'|k) # Up
@@ -335,16 +358,20 @@ configure_node_plan() {
             $'\x1b[5~') # PgUp
                 cursor=$((cursor - items_per_page))
                 [ "$cursor" -lt 0 ] && cursor=0
+                needs_full_redraw=1
                 ;;
             $'\x1b[6~') # PgDn
                 cursor=$((cursor + items_per_page))
                 [ "$cursor" -ge "$total" ] && cursor=$((total - 1))
+                needs_full_redraw=1
                 ;;
-            $'\x1b[1~'|$'\x1b[H') # Home
+            $'\x1b[H'|$'\x1b[1~') # Home
                 cursor=0
+                needs_full_redraw=1
                 ;;
-            $'\x1b[4~'|$'\x1b[F') # End
+            $'\x1b[F'|$'\x1b[4~') # End
                 cursor=$((total - 1))
+                needs_full_redraw=1
                 ;;
             ' ') # Space - select/deselect current node
                 k="${all_keys[cursor]}"
@@ -356,15 +383,18 @@ configure_node_plan() {
                     # Mark for unfail if it was failed (applied on save)
                     is_node_failed "$k" 2>/dev/null && unfail[$k]=1
                 fi
+                needs_full_redraw=1
                 ;;
             a|A) # Select all (marks failed for unfail on save)
                 for k in "${all_keys[@]}"; do
                     enabled[$k]=1
                     is_node_failed "$k" 2>/dev/null && unfail[$k]=1
                 done
+                needs_full_redraw=1
                 ;;
             n|N) # Select none (also clears unfail marks)
                 for k in "${all_keys[@]}"; do enabled[$k]=0; unfail[$k]=0; done
+                needs_full_redraw=1
                 ;;
             t|T) # Toggle all
                 for k in "${all_keys[@]}"; do
@@ -376,6 +406,7 @@ configure_node_plan() {
                         is_node_failed "$k" 2>/dev/null && unfail[$k]=1
                     fi
                 done
+                needs_full_redraw=1
                 ;;
             s|S) # Save
                 if [ -n "${PLAN_FILE:-}" ]; then
@@ -467,8 +498,25 @@ configure_node_plan() {
                         cursor=$((num - 1))  # Move cursor to last toggled
                     fi
                 done
+                needs_full_redraw=1
                 ;;
         esac
+
+        # Decide: targeted cell redraw (arrow moves on same page) or full redraw
+        if [ "$needs_full_redraw" -eq 0 ] && [ "$cursor" -ne "$prev_cursor" ]; then
+            # Check if cursor stayed on the same page
+            local prev_page=$((prev_cursor / cols / page_rows))
+            local cur_page_check=$((cursor / cols / page_rows))
+            if [ "$prev_page" -eq "$cur_page_check" ]; then
+                # Same page — just redraw old and new cell
+                tput civis 2>/dev/null || true
+                redraw_cell "$prev_cursor"
+                redraw_cell "$cursor"
+                tput cnorm 2>/dev/null || true
+                continue
+            fi
+        fi
+        # Everything else: full redraw (handled by draw_grid at top of loop)
     done
 }
 
