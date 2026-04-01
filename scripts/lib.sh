@@ -154,6 +154,94 @@ discover_nodes() {
     return 1
 }
 
+# Ensure ~/.ssh/config has sensible defaults for testbed nodes.
+# Nodes get new host keys after every imaging, so StrictHostKeyChecking must be off.
+# Idempotent: updates existing values if wrong, adds block if missing.
+ensure_ssh_config() {
+    local ssh_dir="$HOME/.ssh"
+    local ssh_conf="$ssh_dir/config"
+    mkdir -p "$ssh_dir"
+    chmod 700 "$ssh_dir"
+
+    # If no config file, just create the block
+    if [ ! -f "$ssh_conf" ]; then
+        cat >> "$ssh_conf" <<'EOF'
+
+# Cosmos Core — testbed nodes get new keys after imaging
+Host node* mob* sdr* srv*
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    LogLevel ERROR
+EOF
+        chmod 600 "$ssh_conf"
+        return 0
+    fi
+
+    # Check if a Host block already covers node*
+    if grep -qE '^\s*Host\s+.*node\*' "$ssh_conf"; then
+        # Check if anything actually needs fixing before editing
+        local needs_fix=0
+        if grep -A5 -E '^\s*Host\s+.*node\*' "$ssh_conf" | grep -qiE '^\s*StrictHostKeyChecking\s+(yes|ask)'; then
+            needs_fix=1
+        fi
+        if grep -A5 -E '^\s*Host\s+.*node\*' "$ssh_conf" | grep -qiE '^\s*UserKnownHostsFile\s' \
+           && ! grep -A5 -E '^\s*Host\s+.*node\*' "$ssh_conf" | grep -q '/dev/null'; then
+            needs_fix=1
+        fi
+
+        if [ "$needs_fix" -eq 1 ]; then
+            # Backup before editing — find a unique backup name
+            local backup="${ssh_conf}.bak"
+            if [ -f "$backup" ]; then
+                local n=1
+                while [ -f "${ssh_conf}.bak.${n}" ]; do
+                    ((n++)) || true
+                done
+                backup="${ssh_conf}.bak.${n}"
+            fi
+            cp "$ssh_conf" "$backup"
+
+            # Fix individual settings in the node* block
+            local in_block=0
+            local tmpfile
+            tmpfile=$(mktemp)
+            while IFS= read -r line; do
+                if echo "$line" | grep -qE '^\s*Host\s+.*node\*'; then
+                    in_block=1
+                    echo "$line" >> "$tmpfile"
+                    continue
+                fi
+                # Detect next Host block — stop editing
+                if [ "$in_block" -eq 1 ] && echo "$line" | grep -qE '^\s*Host\s'; then
+                    in_block=0
+                fi
+                if [ "$in_block" -eq 1 ]; then
+                    if echo "$line" | grep -qiE '^\s*StrictHostKeyChecking\s+(yes|ask)'; then
+                        line=$(echo "$line" | sed -E 's/(StrictHostKeyChecking\s+)(yes|ask)/\1no/i')
+                    fi
+                    if echo "$line" | grep -qiE '^\s*UserKnownHostsFile\s' && ! echo "$line" | grep -q '/dev/null'; then
+                        line=$(echo "$line" | sed -E 's|(UserKnownHostsFile\s+).*|\1/dev/null|')
+                    fi
+                fi
+                echo "$line" >> "$tmpfile"
+            done < "$ssh_conf"
+            mv "$tmpfile" "$ssh_conf"
+            chmod 600 "$ssh_conf"
+        fi
+    else
+        # No matching block — append one
+        cat >> "$ssh_conf" <<'EOF'
+
+# Cosmos Core — testbed nodes get new keys after imaging
+Host node* mob* sdr* srv*
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    LogLevel ERROR
+EOF
+        chmod 600 "$ssh_conf"
+    fi
+}
+
 # Function to run SSH commands with proper options
 # Usage: run_ssh_command <hostname> <command> [timeout_seconds]
 run_ssh_command() {

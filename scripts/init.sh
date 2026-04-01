@@ -71,6 +71,9 @@ init_start_time=$(date +%s)
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 
+# --- Ensure SSH config for manual access to nodes ---
+ensure_ssh_config
+
 # --- Main initialization ---
 echo -e "\n${CYAN}Turning off all nodes...${NC}"
 omf tell -a offh -t all 2>&1 | grep -v "^/.*warning:" || true
