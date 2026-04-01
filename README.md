@@ -16,7 +16,7 @@
               ✦    ·    .         *         .    ·    ✦    .    *
 ```
 
-A quick-start tool for the [ORBIT/COSMOS wireless testbed](https://www.orbit-lab.org/). It gets your nodes imaged, powered on, and ready so you can jump straight into your experiment.
+A quick-start tool for the [COSMOS](https://www.cosmos-lab.org/) (and [ORBIT](https://www.orbit-lab.org/)) wireless testbed. It gets your nodes imaged, powered on, and ready so you can jump straight into your experiment.
 
 ## How it works
 
