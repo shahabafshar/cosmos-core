@@ -370,8 +370,9 @@ configure_node_plan() {
             [ "${enabled[$k]}" -eq 1 ] 2>/dev/null && ((sel_count++)) || true
             is_node_failed "$k" 2>/dev/null && [ "${unfail[$k]}" -ne 1 ] 2>/dev/null && ((failed_count++)) || true
         done
-        # Row tracking: banner(14) + title(1) + site(1) = 16, then summary is next
-        summary_row=16
+        # Row tracking: banner(14) + title(1) + site(1) = row 15, summary at row 15
+        # (tput cup is 0-based; clear+banner leading \n may be absorbed by some terminals)
+        summary_row=15
         echo -e "     ${GREEN}${sel_count} selected${NC} / ${total} total${failed_count:+  ${RED}${failed_count} failed${NC}}\n"
         # After summary + blank line we're at row 18
 
