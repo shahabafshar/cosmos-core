@@ -199,16 +199,12 @@ configure_node_plan() {
     [ "$page_rows" -lt 3 ] && page_rows=3
 
     # Screen row positions (set by draw_grid, used by repaint_cell/repaint_page).
-    # CUP_OFFSET compensates for any discrepancy between echo line counting and tput cup positioning.
-    # Calibrated on first draw.
     local grid_start_row=0
     local summary_row=0
     local page_ind_row=-1  # -1 means no page indicator
-    local CUP_OFFSET=0
-    local calibrated=0
 
-    # Helper: tput cup with CUP_OFFSET applied
-    cup() { tput cup $(($1 + CUP_OFFSET)) "$2"; }
+    # Helper: position cursor at row, col
+    cup() { tput cup "$1" "$2"; }
 
     # Repaint a single cell in-place + update the summary header line.
     # Used for Space toggle — avoids full redraw.
@@ -377,8 +373,8 @@ configure_node_plan() {
             [ "${enabled[$k]}" -eq 1 ] 2>/dev/null && ((sel_count++)) || true
             is_node_failed "$k" 2>/dev/null && [ "${unfail[$k]}" -ne 1 ] 2>/dev/null && ((failed_count++)) || true
         done
-        # Row tracking: banner(14) + title(1) + site(1) = 16, then summary is next
-        summary_row=16
+        # Row tracking: banner(14) + title(1) + site(1) + 1 offset = 17
+        summary_row=17
         echo -e "     ${GREEN}${sel_count} selected${NC} / ${total} total${failed_count:+  ${RED}${failed_count} failed${NC}}\n"
         # After summary + blank line we're at row 18
 
@@ -405,21 +401,7 @@ configure_node_plan() {
             echo ""
             ((next_row += 1)) || true
         fi
-        grid_start_row=$next_row
-
-        # Calibrate CUP_OFFSET on first draw: compare where echo has placed us
-        # vs what tput cup would target. This accounts for terminal-specific differences.
-        if [ "$calibrated" -eq 0 ]; then
-            local _cr _cc
-            IFS=';' read -sdR -p $'\x1b[6n' _cr _cc </dev/tty 2>/dev/null || true
-            _cr=${_cr#*[}
-            if [ -n "$_cr" ] && [ "$_cr" -gt 0 ] 2>/dev/null; then
-                # DSR returns 1-based row; tput cup uses 0-based
-                local actual_row=$((_cr - 1))
-                CUP_OFFSET=$((actual_row - grid_start_row))
-            fi
-            calibrated=1
-        fi
+        grid_start_row=$((next_row + 1))
 
         local start_idx=$((page_offset * cols))
         local end_idx=$(( (page_offset + page_rows) * cols ))
