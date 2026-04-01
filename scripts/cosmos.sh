@@ -207,10 +207,12 @@ configure_node_plan() {
         local old=$1 new=$2
         local old_vis=$((old - page_offset * cols))
         local new_vis=$((new - page_offset * cols))
+        # Each cell is (4 + cell_w) chars wide. The > marker is at offset 4 within the cell.
+        local cell_total=$((4 + cell_w))
         local old_row=$((grid_start_row + old_vis / cols))
-        local old_col=$(( (old_vis % cols) * (cell_w + 4) ))
+        local old_col=$(( (old_vis % cols) * cell_total + 4 ))
         local new_row=$((grid_start_row + new_vis / cols))
-        local new_col=$(( (new_vis % cols) * (cell_w + 4) ))
+        local new_col=$(( (new_vis % cols) * cell_total + 4 ))
         # Erase old marker
         tput cup "$old_row" "$old_col"
         echo -n " "
@@ -267,14 +269,12 @@ configure_node_plan() {
         local end_idx=$(( (page_offset + page_rows) * cols ))
         [ "$end_idx" -gt "$total" ] && end_idx=$total
 
-        # Calculate grid start row: banner lines + header lines + page indicator
-        local total_rows=$(( (total + cols - 1) / cols ))  # redeclare for scope
-        local banner_lines
-        banner_lines=$(echo -e "$COSMOS_BANNER" | wc -l)
-        grid_start_row=$((banner_lines + 4))  # banner + title + site + summary+blank
-        if [ "$total_rows" -gt "$page_rows" ]; then
-            ((grid_start_row += 1)) || true
-        fi
+        # Query actual terminal cursor row to know where the grid starts.
+        # DSR (Device Status Report): ESC[6n → terminal responds ESC[row;colR
+        local _csr_row _csr_col
+        IFS=';' read -sdR -p $'\x1b[6n' _csr_row _csr_col </dev/tty 2>/dev/null
+        grid_start_row=${_csr_row#*[}
+        grid_start_row=$((grid_start_row - 1))  # tput is 0-based, DSR is 1-based
 
         local i idx idx_pad hostname short_name plain len pad k marker
         for (( i=start_idx; i<end_idx; i++ )); do
