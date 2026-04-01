@@ -198,10 +198,17 @@ configure_node_plan() {
     local page_rows=$(( term_h - header_lines ))
     [ "$page_rows" -lt 3 ] && page_rows=3
 
-    # Screen row positions (set by draw_grid, used by repaint_cell/repaint_page)
+    # Screen row positions (set by draw_grid, used by repaint_cell/repaint_page).
+    # CUP_OFFSET compensates for any discrepancy between echo line counting and tput cup positioning.
+    # Calibrated on first draw.
     local grid_start_row=0
     local summary_row=0
     local page_ind_row=-1  # -1 means no page indicator
+    local CUP_OFFSET=0
+    local calibrated=0
+
+    # Helper: tput cup with CUP_OFFSET applied
+    cup() { tput cup $(($1 + CUP_OFFSET)) "$2"; }
 
     # Repaint a single cell in-place + update the summary header line.
     # Used for Space toggle — avoids full redraw.
@@ -223,7 +230,7 @@ configure_node_plan() {
         pad=$((cell_w - len - 1))
         [ "$pad" -lt 0 ] && pad=0
 
-        tput cup "$row" "$col"
+        cup "$row" "$col"
         if is_node_failed "$k" 2>/dev/null && [ "${unfail[$k]}" -ne 1 ] 2>/dev/null; then
             echo -ne "    ${marker}${RED}${idx_pad}. [!] ${short_name}${NC}"
         elif [ "${enabled[$k]}" -eq 1 ] 2>/dev/null; then
@@ -239,13 +246,13 @@ configure_node_plan() {
             [ "${enabled[$k]}" -eq 1 ] 2>/dev/null && ((sel_count++)) || true
             is_node_failed "$k" 2>/dev/null && [ "${unfail[$k]}" -ne 1 ] 2>/dev/null && ((failed_count++)) || true
         done
-        tput cup "$summary_row" 0
+        cup "$summary_row" 0
         echo -ne "     ${GREEN}${sel_count} selected${NC} / ${total} total"
         [ "$failed_count" -gt 0 ] && echo -ne "  ${RED}${failed_count} failed${NC}"
         tput el
 
         # Park cursor
-        tput cup "$((grid_start_row + page_rows + 5))" 0
+        cup "$((grid_start_row + page_rows + 5))" 0
     }
 
     # Repaint all visible cells + page indicator + summary in-place (no clear).
@@ -258,7 +265,7 @@ configure_node_plan() {
             [ "${enabled[$k]}" -eq 1 ] 2>/dev/null && ((sel_count++)) || true
             is_node_failed "$k" 2>/dev/null && [ "${unfail[$k]}" -ne 1 ] 2>/dev/null && ((failed_count++)) || true
         done
-        tput cup "$summary_row" 0
+        cup "$summary_row" 0
         echo -ne "     ${GREEN}${sel_count} selected${NC} / ${total} total"
         [ "$failed_count" -gt 0 ] && echo -ne "  ${RED}${failed_count} failed${NC}"
         tput el
@@ -268,7 +275,7 @@ configure_node_plan() {
             local total_rows_all=$(( (total + cols - 1) / cols ))
             local cur_page=$((page_offset / page_rows + 1))
             local total_pages=$(( (total_rows_all + page_rows - 1) / page_rows ))
-            tput cup "$page_ind_row" 0
+            cup "$page_ind_row" 0
             echo -ne "     ${CYAN}Page ${cur_page}/${total_pages}${NC} (${PURPLE}PgUp/PgDn${NC} to scroll)"
             tput el
         fi
@@ -294,7 +301,7 @@ configure_node_plan() {
             pad=$((cell_w - len - 1))
             [ "$pad" -lt 0 ] && pad=0
 
-            tput cup "$row" "$col"
+            cup "$row" "$col"
             if is_node_failed "$k" 2>/dev/null && [ "${unfail[$k]}" -ne 1 ] 2>/dev/null; then
                 echo -ne "    ${marker}${RED}${idx_pad}. [!] ${short_name}${NC}"
             elif [ "${enabled[$k]}" -eq 1 ] 2>/dev/null; then
@@ -305,13 +312,13 @@ configure_node_plan() {
             printf '%*s' "$pad" ''
         done
 
-        # Clear remainder of last row if partial (e.g. 26 nodes / 3 cols = last row has 2, clear 3rd)
+        # Clear remainder of last row if partial
         local items_on_page=$((end_idx - start_idx))
         local last_row_items=$((items_on_page % cols))
         if [ "$last_row_items" -gt 0 ] && [ "$last_row_items" -lt "$cols" ]; then
             local last_row=$((grid_start_row + items_on_page / cols))
             local clear_col=$((last_row_items * cell_total))
-            tput cup "$last_row" "$clear_col"
+            cup "$last_row" "$clear_col"
             tput el
         fi
 
@@ -319,12 +326,12 @@ configure_node_plan() {
         local visible_rows=$(( (items_on_page + cols - 1) / cols ))
         local r
         for (( r=visible_rows; r<page_rows; r++ )); do
-            tput cup "$((grid_start_row + r))" 0
+            cup "$((grid_start_row + r))" 0
             tput el
         done
 
         # Park cursor
-        tput cup "$((grid_start_row + page_rows + 5))" 0
+        cup "$((grid_start_row + page_rows + 5))" 0
     }
 
     # Swap the > marker between two grid indices (no full redraw).
@@ -340,13 +347,13 @@ configure_node_plan() {
         local new_row=$((grid_start_row + new_vis / cols))
         local new_col=$(( (new_vis % cols) * cell_total + 4 ))
         # Erase old marker
-        tput cup "$old_row" "$old_col"
+        cup "$old_row" "$old_col"
         echo -n " "
         # Draw new marker
-        tput cup "$new_row" "$new_col"
+        cup "$new_row" "$new_col"
         echo -ne "${YELLOW}>${NC}"
         # Park terminal cursor out of the way
-        tput cup "$((grid_start_row + page_rows + 5))" 0
+        cup "$((grid_start_row + page_rows + 5))" 0
     }
 
     # Function to draw the grid
@@ -370,9 +377,8 @@ configure_node_plan() {
             [ "${enabled[$k]}" -eq 1 ] 2>/dev/null && ((sel_count++)) || true
             is_node_failed "$k" 2>/dev/null && [ "${unfail[$k]}" -ne 1 ] 2>/dev/null && ((failed_count++)) || true
         done
-        # Row tracking: banner(14) + title(1) + site(1) = row 15, summary at row 15
-        # (tput cup is 0-based; clear+banner leading \n may be absorbed by some terminals)
-        summary_row=15
+        # Row tracking: banner(14) + title(1) + site(1) = 16, then summary is next
+        summary_row=16
         echo -e "     ${GREEN}${sel_count} selected${NC} / ${total} total${failed_count:+  ${RED}${failed_count} failed${NC}}\n"
         # After summary + blank line we're at row 18
 
@@ -400,6 +406,20 @@ configure_node_plan() {
             ((next_row += 1)) || true
         fi
         grid_start_row=$next_row
+
+        # Calibrate CUP_OFFSET on first draw: compare where echo has placed us
+        # vs what tput cup would target. This accounts for terminal-specific differences.
+        if [ "$calibrated" -eq 0 ]; then
+            local _cr _cc
+            IFS=';' read -sdR -p $'\x1b[6n' _cr _cc </dev/tty 2>/dev/null || true
+            _cr=${_cr#*[}
+            if [ -n "$_cr" ] && [ "$_cr" -gt 0 ] 2>/dev/null; then
+                # DSR returns 1-based row; tput cup uses 0-based
+                local actual_row=$((_cr - 1))
+                CUP_OFFSET=$((actual_row - grid_start_row))
+            fi
+            calibrated=1
+        fi
 
         local start_idx=$((page_offset * cols))
         local end_idx=$(( (page_offset + page_rows) * cols ))
