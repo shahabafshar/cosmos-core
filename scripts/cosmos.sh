@@ -246,6 +246,75 @@ configure_node_plan() {
         tput cup "$((grid_start_row + page_rows + 5))" 0
     }
 
+    # Repaint all visible cells + page indicator + summary in-place (no clear).
+    repaint_page() {
+        local cell_total=$((4 + cell_w))
+
+        # Update summary line
+        local sel_count=0 failed_count=0
+        for k in "${all_keys[@]}"; do
+            [ "${enabled[$k]}" -eq 1 ] 2>/dev/null && ((sel_count++)) || true
+            is_node_failed "$k" 2>/dev/null && [ "${unfail[$k]}" -ne 1 ] 2>/dev/null && ((failed_count++)) || true
+        done
+        tput cup 16 0
+        echo -ne "     ${GREEN}${sel_count} selected${NC} / ${total} total"
+        [ "$failed_count" -gt 0 ] && echo -ne "  ${RED}${failed_count} failed${NC}"
+        tput el
+
+        # Update page indicator
+        local total_rows_all=$(( (total + cols - 1) / cols ))
+        if [ "$total_rows_all" -gt "$page_rows" ]; then
+            local cur_page=$((page_offset / page_rows + 1))
+            local total_pages=$(( (total_rows_all + page_rows - 1) / page_rows ))
+            tput cup 18 0
+            echo -ne "     ${CYAN}Page ${cur_page}/${total_pages}${NC} (${PURPLE}PgUp/PgDn${NC} to scroll)"
+            tput el
+        fi
+
+        # Repaint each cell in the visible range
+        local start_idx=$((page_offset * cols))
+        local end_idx=$(( (page_offset + page_rows) * cols ))
+        [ "$end_idx" -gt "$total" ] && end_idx=$total
+
+        local i vis row col k idx idx_pad hostname short_name marker plain len pad
+        for (( i=start_idx; i<end_idx; i++ )); do
+            vis=$((i - start_idx))
+            row=$((grid_start_row + vis / cols))
+            col=$(( (vis % cols) * cell_total ))
+            k="${all_keys[i]}"
+            idx=$((i + 1))
+            if [ "$total" -ge 100 ]; then idx_pad=$(printf "%3d" "$idx"); else idx_pad=$(printf "%2d" "$idx"); fi
+            IFS='|' read -r hostname _ <<< "${NODES[$k]}"
+            short_name="${hostname%%.*}"
+            if [ "$i" -eq "$cursor" ]; then marker="${YELLOW}>${NC}"; else marker=" "; fi
+            plain="${idx_pad}. [x] ${short_name}"
+            len=${#plain}
+            pad=$((cell_w - len - 1))
+            [ "$pad" -lt 0 ] && pad=0
+
+            tput cup "$row" "$col"
+            if is_node_failed "$k" 2>/dev/null && [ "${unfail[$k]}" -ne 1 ] 2>/dev/null; then
+                echo -ne "    ${marker}${RED}${idx_pad}. [!] ${short_name}${NC}"
+            elif [ "${enabled[$k]}" -eq 1 ] 2>/dev/null; then
+                echo -ne "    ${marker}${CYAN}${idx_pad}.${NC} [${GREEN}x${NC}] ${short_name}"
+            else
+                echo -ne "    ${marker}${CYAN}${idx_pad}.${NC} [${RED} ${NC}] ${short_name}"
+            fi
+            printf '%*s' "$pad" ''
+        done
+
+        # Clear any leftover rows if last page is shorter
+        local visible_rows=$(( (end_idx - start_idx + cols - 1) / cols ))
+        local r
+        for (( r=visible_rows; r<page_rows; r++ )); do
+            tput cup "$((grid_start_row + r))" 0
+            tput el
+        done
+
+        # Park cursor
+        tput cup "$((grid_start_row + page_rows + 5))" 0
+    }
+
     # Swap the > marker between two grid indices (no full redraw).
     # Only call when both indices are on the currently visible page.
     move_marker() {
@@ -406,20 +475,30 @@ configure_node_plan() {
             $'\x1b[5~') # PgUp
                 cursor=$((cursor - items_per_page))
                 [ "$cursor" -lt 0 ] && cursor=0
-                needs_full=1
+                local cr=$((cursor / cols))
+                if [ "$cr" -lt "$page_offset" ]; then page_offset=$cr; fi
+                repaint_page
                 ;;
             $'\x1b[6~') # PgDn
                 cursor=$((cursor + items_per_page))
                 [ "$cursor" -ge "$total" ] && cursor=$((total - 1))
-                needs_full=1
+                local cr=$((cursor / cols))
+                if [ "$cr" -ge $((page_offset + page_rows)) ]; then
+                    page_offset=$((cr - page_rows + 1))
+                fi
+                repaint_page
                 ;;
             $'\x1b[H'|$'\x1b[1~') # Home
                 cursor=0
-                needs_full=1
+                page_offset=0
+                repaint_page
                 ;;
             $'\x1b[F'|$'\x1b[4~') # End
                 cursor=$((total - 1))
-                needs_full=1
+                local cr=$((cursor / cols))
+                page_offset=$((cr - page_rows + 1))
+                [ "$page_offset" -lt 0 ] && page_offset=0
+                repaint_page
                 ;;
             ' ') # Space - select/deselect current node
                 k="${all_keys[cursor]}"
@@ -438,11 +517,11 @@ configure_node_plan() {
                     enabled[$k]=1
                     is_node_failed "$k" 2>/dev/null && unfail[$k]=1
                 done
-                needs_full=1
+                repaint_page
                 ;;
             n|N) # Select none (also clears unfail marks)
                 for k in "${all_keys[@]}"; do enabled[$k]=0; unfail[$k]=0; done
-                needs_full=1
+                repaint_page
                 ;;
             t|T) # Toggle all
                 for k in "${all_keys[@]}"; do
@@ -454,7 +533,7 @@ configure_node_plan() {
                         is_node_failed "$k" 2>/dev/null && unfail[$k]=1
                     fi
                 done
-                needs_full=1
+                repaint_page
                 ;;
             s|S) # Save
                 if [ -n "${PLAN_FILE:-}" ]; then
