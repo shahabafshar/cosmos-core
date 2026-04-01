@@ -193,8 +193,8 @@ configure_node_plan() {
     # Paging: compute visible rows from terminal height
     local term_h page_offset=0
     term_h=$(tput lines 2>/dev/null || echo 24)
-    # Reserve lines for: banner(~4) + header(2) + footer(5) + failed line(1) = ~12
-    local header_lines=12
+    # Reserve lines for: banner(14) + title(1) + site(1) + summary+blank(2) + page?(1) + blank(1) + footer(6) = ~26
+    local header_lines=26
     local page_rows=$(( term_h - header_lines ))
     [ "$page_rows" -lt 3 ] && page_rows=3
 
@@ -373,8 +373,8 @@ configure_node_plan() {
             [ "${enabled[$k]}" -eq 1 ] 2>/dev/null && ((sel_count++)) || true
             is_node_failed "$k" 2>/dev/null && [ "${unfail[$k]}" -ne 1 ] 2>/dev/null && ((failed_count++)) || true
         done
-        # Row tracking: banner(14) + title(1) + site(1) + 1 offset = 17
-        summary_row=17
+        # Row tracking: banner(14) + title(1) + site(1) = row 16
+        summary_row=16
         echo -e "     ${GREEN}${sel_count} selected${NC} / ${total} total${failed_count:+  ${RED}${failed_count} failed${NC}}\n"
         # After summary + blank line we're at row 18
 
@@ -401,7 +401,7 @@ configure_node_plan() {
             echo ""
             ((next_row += 1)) || true
         fi
-        grid_start_row=$((next_row + 1))
+        grid_start_row=$next_row
 
         local start_idx=$((page_offset * cols))
         local end_idx=$(( (page_offset + page_rows) * cols ))
