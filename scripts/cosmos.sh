@@ -269,12 +269,14 @@ configure_node_plan() {
         local end_idx=$(( (page_offset + page_rows) * cols ))
         [ "$end_idx" -gt "$total" ] && end_idx=$total
 
-        # Query actual terminal cursor row to know where the grid starts.
-        # DSR (Device Status Report): ESC[6n → terminal responds ESC[row;colR
-        local _csr_row _csr_col
-        IFS=';' read -sdR -p $'\x1b[6n' _csr_row _csr_col </dev/tty 2>/dev/null
-        grid_start_row=${_csr_row#*[}
-        grid_start_row=$((grid_start_row - 1))  # tput is 0-based, DSR is 1-based
+        # Grid start row (0-based for tput cup):
+        # Banner: 14 lines, then title(1) + site(1) + summary+blank(2) + page?(1) + blank(1)
+        local total_rows_all=$(( (total + cols - 1) / cols ))
+        grid_start_row=$((14 + 4))  # banner(14) + title + site + summary + blank
+        if [ "$total_rows_all" -gt "$page_rows" ]; then
+            ((grid_start_row += 1)) || true  # page indicator
+        fi
+        ((grid_start_row += 1)) || true  # blank line after page indicator / summary
 
         local i idx idx_pad hostname short_name plain len pad k marker
         for (( i=start_idx; i<end_idx; i++ )); do
