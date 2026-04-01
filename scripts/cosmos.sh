@@ -395,9 +395,10 @@ configure_node_plan() {
             local total_pages=$(( (total_rows + page_rows - 1) / page_rows ))
             echo -e "     ${CYAN}Page ${cur_page}/${total_pages}${NC} (${PURPLE}PgUp/PgDn${NC} to scroll)"
             ((next_row += 1)) || true
+            echo ""
+            ((next_row += 1)) || true
         fi
-        echo ""
-        grid_start_row=$((next_row + 1))  # blank line, then grid
+        grid_start_row=$next_row
 
         local start_idx=$((page_offset * cols))
         local end_idx=$(( (page_offset + page_rows) * cols ))
