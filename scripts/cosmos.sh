@@ -198,8 +198,10 @@ configure_node_plan() {
     local page_rows=$(( term_h - header_lines ))
     [ "$page_rows" -lt 3 ] && page_rows=3
 
-    # grid_start_row: screen row where the node grid begins (set by draw_grid)
+    # Screen row positions (set by draw_grid, used by repaint_cell/repaint_page)
     local grid_start_row=0
+    local summary_row=0
+    local page_ind_row=-1  # -1 means no page indicator
 
     # Repaint a single cell in-place + update the summary header line.
     # Used for Space toggle — avoids full redraw.
@@ -231,16 +233,16 @@ configure_node_plan() {
         fi
         printf '%*s' "$pad" ''
 
-        # Update summary header line (row 14+2 = banner + title + site, then summary is next)
+        # Update summary header line
         local sel_count=0 failed_count=0
         for k in "${all_keys[@]}"; do
             [ "${enabled[$k]}" -eq 1 ] 2>/dev/null && ((sel_count++)) || true
             is_node_failed "$k" 2>/dev/null && [ "${unfail[$k]}" -ne 1 ] 2>/dev/null && ((failed_count++)) || true
         done
-        tput cup 16 0  # summary line: banner(14) + title(1) + site(1) = row 16
+        tput cup "$summary_row" 0
         echo -ne "     ${GREEN}${sel_count} selected${NC} / ${total} total"
         [ "$failed_count" -gt 0 ] && echo -ne "  ${RED}${failed_count} failed${NC}"
-        tput el  # clear rest of line
+        tput el
 
         # Park cursor
         tput cup "$((grid_start_row + page_rows + 5))" 0
@@ -256,17 +258,17 @@ configure_node_plan() {
             [ "${enabled[$k]}" -eq 1 ] 2>/dev/null && ((sel_count++)) || true
             is_node_failed "$k" 2>/dev/null && [ "${unfail[$k]}" -ne 1 ] 2>/dev/null && ((failed_count++)) || true
         done
-        tput cup 16 0
+        tput cup "$summary_row" 0
         echo -ne "     ${GREEN}${sel_count} selected${NC} / ${total} total"
         [ "$failed_count" -gt 0 ] && echo -ne "  ${RED}${failed_count} failed${NC}"
         tput el
 
-        # Update page indicator
-        local total_rows_all=$(( (total + cols - 1) / cols ))
-        if [ "$total_rows_all" -gt "$page_rows" ]; then
+        # Update page indicator (if present)
+        if [ "$page_ind_row" -ge 0 ]; then
+            local total_rows_all=$(( (total + cols - 1) / cols ))
             local cur_page=$((page_offset / page_rows + 1))
             local total_pages=$(( (total_rows_all + page_rows - 1) / page_rows ))
-            tput cup 18 0
+            tput cup "$page_ind_row" 0
             echo -ne "     ${CYAN}Page ${cur_page}/${total_pages}${NC} (${PURPLE}PgUp/PgDn${NC} to scroll)"
             tput el
         fi
@@ -303,8 +305,18 @@ configure_node_plan() {
             printf '%*s' "$pad" ''
         done
 
-        # Clear any leftover rows if last page is shorter
-        local visible_rows=$(( (end_idx - start_idx + cols - 1) / cols ))
+        # Clear remainder of last row if partial (e.g. 26 nodes / 3 cols = last row has 2, clear 3rd)
+        local items_on_page=$((end_idx - start_idx))
+        local last_row_items=$((items_on_page % cols))
+        if [ "$last_row_items" -gt 0 ] && [ "$last_row_items" -lt "$cols" ]; then
+            local last_row=$((grid_start_row + items_on_page / cols))
+            local clear_col=$((last_row_items * cell_total))
+            tput cup "$last_row" "$clear_col"
+            tput el
+        fi
+
+        # Clear any leftover full rows if last page is shorter
+        local visible_rows=$(( (items_on_page + cols - 1) / cols ))
         local r
         for (( r=visible_rows; r<page_rows; r++ )); do
             tput cup "$((grid_start_row + r))" 0
@@ -358,7 +370,10 @@ configure_node_plan() {
             [ "${enabled[$k]}" -eq 1 ] 2>/dev/null && ((sel_count++)) || true
             is_node_failed "$k" 2>/dev/null && [ "${unfail[$k]}" -ne 1 ] 2>/dev/null && ((failed_count++)) || true
         done
+        # Row tracking: banner(14) + title(1) + site(1) = 16, then summary is next
+        summary_row=16
         echo -e "     ${GREEN}${sel_count} selected${NC} / ${total} total${failed_count:+  ${RED}${failed_count} failed${NC}}\n"
+        # After summary + blank line we're at row 18
 
         # Compute total grid rows and paging
         local total_rows=$(( (total + cols - 1) / cols ))
@@ -372,25 +387,21 @@ configure_node_plan() {
         fi
 
         # Page indicator
+        local next_row=$((summary_row + 2))  # summary line + blank
+        page_ind_row=-1
         if [ "$total_rows" -gt "$page_rows" ]; then
+            page_ind_row=$next_row
             local cur_page=$((page_offset / page_rows + 1))
             local total_pages=$(( (total_rows + page_rows - 1) / page_rows ))
             echo -e "     ${CYAN}Page ${cur_page}/${total_pages}${NC} (${PURPLE}PgUp/PgDn${NC} to scroll)"
+            ((next_row += 1)) || true
         fi
         echo ""
+        grid_start_row=$((next_row + 1))  # blank line, then grid
 
         local start_idx=$((page_offset * cols))
         local end_idx=$(( (page_offset + page_rows) * cols ))
         [ "$end_idx" -gt "$total" ] && end_idx=$total
-
-        # Grid start row (0-based for tput cup):
-        # Banner: 14 lines, then title(1) + site(1) + summary+blank(2) + page?(1) + blank(1)
-        local total_rows_all=$(( (total + cols - 1) / cols ))
-        grid_start_row=$((14 + 4))  # banner(14) + title + site + summary + blank
-        if [ "$total_rows_all" -gt "$page_rows" ]; then
-            ((grid_start_row += 1)) || true  # page indicator
-        fi
-        ((grid_start_row += 1)) || true  # blank line after page indicator / summary
 
         local i idx idx_pad hostname short_name plain len pad k marker
         for (( i=start_idx; i<end_idx; i++ )); do
