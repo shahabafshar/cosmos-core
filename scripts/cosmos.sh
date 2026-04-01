@@ -335,10 +335,6 @@ configure_node_plan() {
             echo -ne "     ${RED}[!] = failed (${failed_count}) — select to retry, or r to clear all${NC}"
             tput el
             ((footer_row += 2)) || true
-        else
-            cup "$((footer_row))" 0
-            tput el
-            ((footer_row += 1)) || true
         fi
         cup "$((footer_row))" 0
         tput el
