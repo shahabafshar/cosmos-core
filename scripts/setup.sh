@@ -170,6 +170,9 @@ draw_grid() {
     done
 }
 
+# Hide cursor during progress display
+tput civis 2>/dev/null || true
+
 # Print initial grid
 echo ""
 draw_grid 0
@@ -246,6 +249,7 @@ echo -ne "\033[$((num_rows + 1))A"
 draw_grid $elapsed
 
 if [ ${#reachable_indices[@]} -eq 0 ]; then
+    tput cnorm 2>/dev/null || true
     echo -e "\n${RED}No reachable nodes. Aborting.${NC}"
     if [ $ssh_fail_count -gt 0 ]; then
         echo -e "${YELLOW}SSH failures.${NC} Common causes: missing key, wrong user, sshd not ready, or host key mismatch."
@@ -302,6 +306,9 @@ elapsed=$(($(date +%s) - start_time))
 echo -ne "\033[$((num_rows + 1))A"
 draw_grid $elapsed
 echo ""
+
+# Restore cursor
+tput cnorm 2>/dev/null || true
 
 # Collect results
 success_nodes=()
