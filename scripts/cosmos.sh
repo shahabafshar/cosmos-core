@@ -758,6 +758,11 @@ while true; do
             ;;
         6) show_about ; continue ;;
         7) echo -e "\n${GREEN}Bye.${NC}"; exit 0 ;;
+        8) # Hidden: fix SSH config for testbed nodes
+            echo -e "\n${CYAN}Fixing SSH config for testbed nodes...${NC}"
+            ensure_ssh_config
+            echo -e "${GREEN}Done.${NC} SSH to nodes should now work without host key warnings."
+            ;;
         *) echo -e "${RED}Invalid option.${NC}" ;;
     esac
     echo -e "\n${PURPLE}Press Enter for menu...${NC}"
