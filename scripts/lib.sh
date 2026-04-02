@@ -240,6 +240,30 @@ Host node* mob* sdr* srv*
 EOF
         chmod 600 "$ssh_conf"
     fi
+
+    # Clean stale entries from known_hosts for testbed nodes.
+    # Existing entries cause "HOST IDENTIFICATION HAS CHANGED" even with
+    # StrictHostKeyChecking=no in config, because SSH matches cached keys first.
+    local known_hosts="$ssh_dir/known_hosts"
+    if [ -f "$known_hosts" ]; then
+        # Check if any testbed node entries exist before modifying
+        if grep -qE '^(node|mob|sdr|srv)[a-zA-Z0-9_-]' "$known_hosts" 2>/dev/null; then
+            # Backup known_hosts (unique name)
+            local kh_backup="${known_hosts}.bak"
+            if [ -f "$kh_backup" ]; then
+                local n=1
+                while [ -f "${known_hosts}.bak.${n}" ]; do ((n++)) || true; done
+                kh_backup="${known_hosts}.bak.${n}"
+            fi
+            cp "$known_hosts" "$kh_backup"
+            # Remove entries matching testbed node hostnames
+            local tmpfile
+            tmpfile=$(mktemp)
+            grep -vE '^(node|mob|sdr|srv)[a-zA-Z0-9_-]' "$known_hosts" > "$tmpfile" 2>/dev/null || true
+            mv "$tmpfile" "$known_hosts"
+            chmod 600 "$known_hosts"
+        fi
+    fi
 }
 
 # Function to run SSH commands with proper options
