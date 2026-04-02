@@ -619,7 +619,12 @@ configure_node_plan() {
                 ;;
             [0-9]) # Number input mode - show prompt and read full input
                 local input="$key"
-                echo -ne "\n     ${CYAN}Select/deselect:${NC} $input"
+                # Show prompt on a fixed row below the grid
+                local prompt_row=$((grid_start_row + page_rows + 2))
+                tput cnorm 2>/dev/null || true  # show cursor for typing
+                cup "$prompt_row" 0
+                echo -ne "     ${CYAN}Select/deselect:${NC} $input"
+                tput el
                 while true; do
                     IFS= read -rsn1 ch
                     if [[ "$ch" == '' ]]; then  # Enter key
@@ -627,7 +632,9 @@ configure_node_plan() {
                     elif [[ "$ch" == $'\x7f' || "$ch" == $'\x08' ]]; then  # Backspace
                         if [ ${#input} -gt 0 ]; then
                             input="${input%?}"
-                            echo -ne "\r     ${CYAN}Select/deselect:${NC} ${input} \b"
+                            cup "$prompt_row" 0
+                            echo -ne "     ${CYAN}Select/deselect:${NC} ${input} "
+                            tput el
                         fi
                     elif [[ "$ch" == $'\x1b' ]]; then  # Escape - cancel
                         input=""
@@ -637,6 +644,7 @@ configure_node_plan() {
                         echo -n "$ch"
                     fi
                 done
+                tput civis 2>/dev/null || true  # hide cursor again
                 # Process the input - toggle each number
                 for num in $input; do
                     if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -ge 1 ] && [ "$num" -le "$total" ]; then
