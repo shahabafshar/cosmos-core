@@ -193,8 +193,8 @@ configure_node_plan() {
     # Paging: compute visible rows from terminal height
     local term_h page_offset=0
     term_h=$(tput lines 2>/dev/null || echo 24)
-    # Reserve lines for non-grid content (header + footer)
-    local header_lines=12
+    # Reserve lines for non-grid content: header(~5) + footer(~6) = ~11
+    local header_lines=11
     local page_rows=$(( term_h - header_lines ))
     [ "$page_rows" -lt 3 ] && page_rows=3
 
@@ -203,8 +203,8 @@ configure_node_plan() {
     local summary_row=0
     local page_ind_row=-1  # -1 means no page indicator
 
-    # Helper: position cursor at row, col (adjusted for terminal offset)
-    cup() { tput cup "$(($1 + 1))" "$2"; }
+    # Helper: position cursor at row, col
+    cup() { tput cup "$1" "$2"; }
 
     # Repaint a single cell in-place + update the summary header line.
     # Used for Space toggle — avoids full redraw.
@@ -376,17 +376,16 @@ configure_node_plan() {
     # Function to draw the grid
     draw_grid() {
         clear
-        echo -e "$COSMOS_BANNER"
-        echo -e "     ${YELLOW}Select nodes — choose which nodes to work with${NC}"
+        echo -e "     ${YELLOW}Select nodes${NC} — ${SITE:-unknown} (${total} nodes)"
         local method_label
         case "$DISCOVERY_METHOD" in
-            omf)       method_label="discovered via OMF" ;;
-            arp)       method_label="discovered via ARP (may be incomplete)" ;;
+            omf)       method_label="OMF" ;;
+            arp)       method_label="ARP (may be incomplete)" ;;
             hardcoded) method_label="hardcoded fallback" ;;
-            cached)    method_label="loaded from cache (r to refresh)" ;;
+            cached)    method_label="cached (r to refresh)" ;;
             *)         method_label="unknown" ;;
         esac
-        echo -e "     ${CYAN}Site: ${SITE:-unknown} | Nodes: ${method_label} | Full name: <shortname>.${NODE_DOMAIN}${NC}"
+        echo -e "     ${CYAN}Discovery: ${method_label} | <shortname>.${NODE_DOMAIN}${NC}"
 
         # Count selected and failed for header summary
         local sel_count=0 failed_count=0
@@ -394,8 +393,8 @@ configure_node_plan() {
             [ "${enabled[$k]}" -eq 1 ] 2>/dev/null && ((sel_count++)) || true
             is_node_failed "$k" 2>/dev/null && [ "${unfail[$k]}" -ne 1 ] 2>/dev/null && ((failed_count++)) || true
         done
-        # Row tracking: banner(14) + title(1) + site(1) = row 16
-        summary_row=16
+        # Row tracking: title(1) + discovery(1) = row 2
+        summary_row=2
         echo -e "     ${GREEN}${sel_count} selected${NC} / ${total} total${failed_count:+  ${RED}${failed_count} failed${NC}}\n"
         # After summary + blank line we're at row 18
 
