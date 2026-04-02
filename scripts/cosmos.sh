@@ -578,16 +578,18 @@ configure_node_plan() {
                         # Clear failed status for nodes marked for unfail
                         [ "${unfail[$k]}" -eq 1 ] 2>/dev/null && clear_node_failed "$k"
                     done
-                    echo -e "\n${GREEN}Plan saved${NC}"
-                    sleep 0.5
                 fi
                 tput cnorm 2>/dev/null || true
                 stty "$old_stty"
+                clear
+                echo -e "${GREEN}Plan saved.${NC}"
+                sleep 0.5
                 return 0
                 ;;
             q|Q) # Quit without saving
                 tput cnorm 2>/dev/null || true
                 stty "$old_stty"
+                clear
                 return 0
                 ;;
             r|R) # Refresh - delete cache, clear failed, re-discover
