@@ -591,27 +591,22 @@ configure_node_plan() {
                 return 0
                 ;;
             r|R) # Refresh - delete cache, clear failed, re-discover
-                echo -e "\n${CYAN}Clearing failed nodes and re-discovering...${NC}"
-                # Clear failed nodes
                 clear_failed_nodes
-                # Delete cache to force fresh discovery
                 rm -f "$COSMOS_ROOT/.cosmos_nodes"
                 unset NODES NODE_NAMES DISCOVERY_METHOD SITE NODE_DOMAIN
                 declare -gA NODES
                 source "$COSMOS_ROOT/scripts/config.sh"
-                
-                # Safety check - ensure NODES is populated
+
                 if [ ${#NODES[@]} -eq 0 ]; then
-                    echo -e "${RED}Error: No nodes found after refresh!${NC}"
-                    echo -e "${YELLOW}Check your network connection or config.sh fallback list.${NC}"
-                    sleep 2
+                    # Will show on next draw_grid
                     continue
                 fi
-                
+
                 all_keys=($(printf '%s\n' "${!NODES[@]}" | sort -V))
                 total=${#all_keys[@]}
                 cursor=0
-                for k in "${all_keys[@]}"; do enabled[$k]=1; done
+                page_offset=0
+                for k in "${all_keys[@]}"; do enabled[$k]=1; unfail[$k]=0; done
                 if [ -n "${PLAN_FILE:-}" ] && [ -f "$PLAN_FILE" ] && [ -s "$PLAN_FILE" ]; then
                     for k in "${all_keys[@]}"; do enabled[$k]=0; done
                     while IFS= read -r k; do
@@ -620,15 +615,7 @@ configure_node_plan() {
                         [ -n "${NODES[$k]+x}" ] && enabled[$k]=1
                     done < "$PLAN_FILE"
                 fi
-                local method_msg
-                case "$DISCOVERY_METHOD" in
-                    omf) method_msg="via OMF" ;;
-                    arp) method_msg="via ARP" ;;
-                    hardcoded) method_msg="(hardcoded fallback)" ;;
-                    *) method_msg="" ;;
-                esac
-                echo -e "${GREEN}Found ${#NODES[@]} nodes ${method_msg}. Cache updated.${NC}"
-                sleep 1
+                needs_full=1
                 ;;
             [0-9]) # Number input mode - show prompt and read full input
                 local input="$key"
