@@ -47,7 +47,23 @@ setup_single_node() {
         pkill -f aireplay-ng || true; \
         ip link set $interface down 2>/dev/null || true; \
         ip addr flush dev $interface 2>/dev/null || true" 2>/dev/null || true
-    
+
+    # Ensure WiFi driver is loaded (some nodes have Atheros hardware but no driver auto-loaded)
+    echo "wifi drv" > "$status_file"
+    timeout 15 ssh $SSH_OPTS "${REMOTE_USER}@$hostname" '
+        if [ -d /sys/class/net/wlan0 ]; then exit 0; fi
+        # Detect Atheros card and load the right driver
+        card=$(lspci 2>/dev/null | grep -i "atheros\|qualcomm.*wireless\|ar[59]" || true)
+        if [ -n "$card" ]; then
+            # Try ath5k first (older cards: AR5xxx), then ath9k (newer: AR9xxx, QCA)
+            modprobe ath5k 2>/dev/null || true
+            sleep 1
+            if [ -d /sys/class/net/wlan0 ]; then exit 0; fi
+            modprobe ath9k 2>/dev/null || true
+            sleep 1
+        fi
+    ' 2>/dev/null || true
+
     echo "packages" > "$status_file"
     local success=false
     for i in {1..2}; do
@@ -152,6 +168,7 @@ draw_grid() {
                 case "$status" in
                     "checking")    printf "%s: \033[0;36m%-11s\033[0m" "$name_fixed" "checking" ;;
                     "ready")       printf "%s: \033[0;32m%-11s\033[0m" "$name_fixed" "ready" ;;
+                    "wifi drv")    printf "%s: \033[0;36m%-11s\033[0m" "$name_fixed" "wifi drv" ;;
                     "unreachable") printf "%s: \033[0;31m%-11s\033[0m" "$name_fixed" "unreachable" ;;
         "ssh_wait")    printf "%s: \033[1;33m%-11s\033[0m" "$name_fixed" "ssh wait" ;;
                     "ssh_fail")    printf "%s: \033[0;31m%-11s\033[0m" "$name_fixed" "ssh fail" ;;
